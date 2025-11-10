@@ -1,0 +1,82 @@
+# Ignore assets and data directories
+assets/
+data/
+vggt/
+old/
+keys/
+TODO.txt
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environment
+venv/
+ENV/
+env/
+.venv/
+
+# PyCharm project files
+.idea/
+
+# VS Code settings
+.vscode/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Test coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# MyPy cache
+.mypy_cache/
+
+# Pytest cache
+.pytest_cache/
+
+# Local configuration files
+*.env
+.env.*
+*.local
