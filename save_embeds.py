@@ -52,7 +52,12 @@ from vggt.vggt.utils.load_fn import load_and_preprocess_images
 # ---------------------------------------------------------------------
 # Helper: build per-image embeddings from VGGT feature tensor
 # ---------------------------------------------------------------------
-def make_image_embeddings(feats_layer: torch.Tensor, target_hw: int = 8) -> torch.Tensor:
+def make_image_embeddings(
+    feats_layer: torch.Tensor,
+    target_hw: int = 8,
+    mode: str = "avg_max",
+    token_chunks: int = 4,
+) -> torch.Tensor:
     """
     Convert a single VGGT feature tensor to per-image embeddings (N, D).
 
@@ -61,25 +66,101 @@ def make_image_embeddings(feats_layer: torch.Tensor, target_hw: int = 8) -> torc
         - (1, N, C, H, W)  spatial maps
         - (1, N, C, P) or (1, N, P, C)  token features
 
+    Args:
+        target_hw: for spatial maps, target H=W when using 2D pooling.
+        mode:
+            - "avg": (default) previous behavior.
+              * tokens  (N, C, P): global mean over tokens -> (N, C)
+              * spatial (N, C, H, W): adaptive avg pool to (target_hw, target_hw),
+                then flatten -> (N, C * target_hw * target_hw)
+            - "avg_max": keep both mean and max statistics over tokens / pooled grid.
+              * tokens: concat [mean, max] over tokens -> (N, 2*C)
+              * spatial: pool to (target_hw, target_hw), flatten, then
+                concat [mean, max] over spatial positions -> (N, 2*C*target_hw*target_hw)
+            - "chunked": split tokens / spatial cells into `token_chunks` segments
+              and keep their means; this preserves some coarse structure.
+              * tokens: (N, C, P) -> (N, C * token_chunks)
+              * spatial: pooled to (target_hw, target_hw), flattened to (N, C, P'),
+                then chunked similarly.
+
+        token_chunks: number of chunks for "chunked" mode.
+
     Returns:
         emb: (N, D) L2-normalized per-image embeddings (torch.Tensor, on CPU)
     """
     feats = feats_layer.squeeze(0)  # drop batch -> (N, ...)
 
     if feats.ndim == 3:
-        # (N, C, P) OR (N, P, C)
+        # Token features: (N, C, P) or (N, P, C)
         if feats.shape[1] <= feats.shape[2]:
-            # (N, C, P) -> avg over tokens
-            emb = feats.mean(dim=-1)  # (N, C)
+            # (N, C, P)
+            feats_tok = feats
         else:
-            # (N, P, C) -> (N, C, P) -> avg over tokens
-            feats = feats.permute(0, 2, 1)  # (N, C, P)
-            emb = feats.mean(dim=-1)        # (N, C)
+            # (N, P, C) -> (N, C, P)
+            feats_tok = feats.permute(0, 2, 1)
+
+        N, C, P = feats_tok.shape
+
+        if mode == "avg":
+            # Original behavior: global mean over tokens
+            emb = feats_tok.mean(dim=-1)  # (N, C)
+
+        elif mode == "avg_max":
+            mean_tok = feats_tok.mean(dim=-1)       # (N, C)
+            max_tok = feats_tok.amax(dim=-1)        # (N, C)
+            emb = torch.cat([mean_tok, max_tok], dim=1)  # (N, 2*C)
+
+        elif mode == "chunked":
+            # Split tokens into token_chunks segments and average within each
+            n_chunks = max(1, int(token_chunks))
+            if P < n_chunks:
+                # Fallback to simple mean if too few tokens
+                emb = feats_tok.mean(dim=-1)
+            else:
+                # Trim so it is divisible by n_chunks
+                P_trim = (P // n_chunks) * n_chunks
+                feats_trim = feats_tok[:, :, :P_trim]                # (N, C, P_trim)
+                feats_chunk = feats_trim.view(N, C, n_chunks, -1)    # (N, C, n_chunks, P_seg)
+                mean_chunks = feats_chunk.mean(dim=-1)               # (N, C, n_chunks)
+                emb = mean_chunks.view(N, C * n_chunks)              # (N, C * n_chunks)
+        else:
+            raise ValueError(f"Unknown mode '{mode}' for token features.")
+
     elif feats.ndim == 4:
-        # (N, C, H, W) spatial maps
+        # Spatial maps: (N, C, H, W)
         N, C, H, W = feats.shape
+
+        # First pool to a fixed grid for controllable dimension
         pooled = F.adaptive_avg_pool2d(feats, (target_hw, target_hw))  # (N, C, target_hw, target_hw)
-        emb = pooled.view(N, -1)  # (N, C * target_hw * target_hw)
+        pooled_flat = pooled.view(N, C, -1)  # (N, C, P'), P' = target_hw * target_hw
+
+        if mode == "avg":
+            # Original behavior: keep all pooled cells flattened
+            emb = pooled.view(N, -1)  # (N, C * target_hw * target_hw)
+
+        elif mode == "avg_max":
+            # Global mean and max over pooled cells per channel, but maintain grid structure
+            mean_sp = pooled_flat.mean(dim=-1)        # (N, C)
+            max_sp = pooled_flat.amax(dim=-1)         # (N, C)
+            # Also keep the flattened grid so the representation is richer
+            grid_flat = pooled.view(N, -1)            # (N, C * target_hw * target_hw)
+            emb = torch.cat([grid_flat, mean_sp, max_sp], dim=1)  # (N, C*hw + 2*C)
+
+        elif mode == "chunked":
+            # Treat pooled cells as tokens and apply chunking over them
+            P = pooled_flat.shape[-1]
+            n_chunks = max(1, int(token_chunks))
+            if P < n_chunks:
+                emb = pooled.view(N, -1)
+            else:
+                P_trim = (P // n_chunks) * n_chunks
+                feats_trim = pooled_flat[:, :, :P_trim]               # (N, C, P_trim)
+                feats_chunk = feats_trim.view(N, C, n_chunks, -1)     # (N, C, n_chunks, P_seg)
+                mean_chunks = feats_chunk.mean(dim=-1)                # (N, C, n_chunks)
+                emb = mean_chunks.view(N, C * n_chunks)               # (N, C * n_chunks)
+        else:
+            raise ValueError(f"Unknown mode '{mode}' for spatial features.")
+
     else:
         raise RuntimeError(f"Unexpected feature shape: {feats.shape}")
 
@@ -122,8 +203,8 @@ def extract_split_embeddings(scene_id: str,
     # and use fixed filenames "all_embeds.npy" and "last_embeds.npy" per split.
     split_out_dir = os.path.join(PRED_ROOT, scene_id, f"split_{split_id}", "embs")
     os.makedirs(split_out_dir, exist_ok=True)
-    out_all_path = os.path.join(split_out_dir, "all_embeds.npy")
-    out_last_path = os.path.join(split_out_dir, "last_embeds.npy")
+    out_all_path = os.path.join(split_out_dir, "all_embeds_avgmax.npz")
+    out_last_path = os.path.join(split_out_dir, "last_embeds_avgmax.npz")
 
     # If already saved, skip
     if os.path.isfile(out_all_path):
@@ -156,10 +237,12 @@ def extract_split_embeddings(scene_id: str,
     all_emb = np.stack([e.numpy() for e in layer_embs], axis=0)  # (L, N, E)
     last_emb = all_emb[-1]  # (N, E)
 
-    np.save(out_all_path, all_emb)
-    np.save(out_last_path, last_emb)
+    np.savez_compressed(out_all_path, all=all_emb, last=last_emb)
+    # np.savez_compressed(out_last_path, last_emb)
     print(f"[INFO] Saved embeddings for scene {scene_id}, split {split_id} -> {out_all_path} (shape={all_emb.shape})")
 
+    # load npz for verification
+    # loaded = np.load(out_all_path).get("all")
 
 # ---------------------------------------------------------------------
 # Per-scene: loop splits

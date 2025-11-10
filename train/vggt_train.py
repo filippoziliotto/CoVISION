@@ -115,7 +115,7 @@ class EdgeClassifier(nn.Module):
 class MultiLayerEdgeClassifier(nn.Module):
     """
     Edge classifier that explicitly uses first, middle, and last VGGT layers,
-    with separate MLPs for low/mid/high features aggregated into a single final MLP.
+    with separate MLPs for low/mid/high features and a learned fusion before final prediction.
 
     Inputs:
         emb_i, emb_j:
@@ -124,59 +124,66 @@ class MultiLayerEdgeClassifier(nn.Module):
     Output:
         - (B,) logits for edge presence/strength
     """
+
     def __init__(self, emb_dim: int, hidden_dim: int = 256, dropout_p: float = 0.2):
         super().__init__()
         self.emb_dim = emb_dim
         self.hidden_dim = hidden_dim
+        self.dropout_p = dropout_p
 
-        self.pair_ln = nn.LayerNorm(4 * emb_dim)
+        # Separate layer norms for low/mid/high branches
+        self.pair_ln_low = nn.LayerNorm(4 * emb_dim)
+        self.pair_ln_mid = nn.LayerNorm(4 * emb_dim)
+        self.pair_ln_high = nn.LayerNorm(4 * emb_dim)
 
-        # Three separate MLPs for low/mid/high level pair features
-        self.pair_mlp_low = nn.Sequential(
-            nn.Linear(4 * emb_dim, hidden_dim),
+        # Shared MLP definition helper
+        def make_pair_mlp():
+            return nn.Sequential(
+                nn.Linear(4 * emb_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout_p),
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.GELU(),
+            )
+
+        # Three separate MLPs for low/mid/high-level pair features
+        self.pair_mlp_low = make_pair_mlp()
+        self.pair_mlp_mid = make_pair_mlp()
+        self.pair_mlp_high = make_pair_mlp()
+
+        # Fusion MLP to combine low/mid/high features
+        self.fusion_mlp = nn.Sequential(
+            nn.Linear(3 * (hidden_dim // 2), hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-        )
-        self.pair_mlp_mid = nn.Sequential(
-            nn.Linear(4 * emb_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-        )
-        self.pair_mlp_high = nn.Sequential(
-            nn.Linear(4 * emb_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
+            nn.Dropout(p=dropout_p),
         )
 
+        # Final classifier head
         self.final_mlp = nn.Sequential(
-            nn.Linear(hidden_dim // 2, hidden_dim // 2),
+            nn.Linear(hidden_dim, hidden_dim // 2),
             nn.GELU(),
             nn.Dropout(p=dropout_p),
             nn.Linear(hidden_dim // 2, 1),
         )
 
-    def _encode_pair(self, e_i: torch.Tensor, e_j: torch.Tensor, mlp: nn.Module) -> torch.Tensor:
-        """Encode a single pair of embeddings (B, E) → (B, hidden_dim // 2) with a provided MLP."""
+    def _encode_pair(self, e_i: torch.Tensor, e_j: torch.Tensor, ln: nn.Module, mlp: nn.Module) -> torch.Tensor:
+        """Encode a single pair of embeddings (B, E) → (B, hidden_dim // 2)."""
         x = torch.cat(
             [e_i, e_j, torch.abs(e_i - e_j), e_i * e_j],
             dim=-1,
         )  # (B, 4E)
-        x = self.pair_ln(x)
-        h = mlp(x)  # (B, hidden_dim // 2)
+        x = ln(x)
+        h = mlp(x)
         return h
 
     def forward(self, emb_i: torch.Tensor, emb_j: torch.Tensor) -> torch.Tensor:
-        # Single-layer case: use the mid MLP by default
+        # Single-layer case
         if emb_i.ndim == 2:
-            # (B, E)
-            h_single = self._encode_pair(emb_i, emb_j, self.pair_mlp_mid)
-            logits = self.final_mlp(h_single).squeeze(-1)  # (B,)
-            return logits
+            h_single = self._encode_pair(emb_i, emb_j, self.pair_ln_mid, self.pair_mlp_mid)
+            logits = self.final_mlp(torch.cat([h_single, h_single, h_single], dim=-1))  # mimic 3-branch fusion
+            return logits.squeeze(-1)
 
-        # Multi-layer case: (B, L, E)
+        # Multi-layer case
         if emb_i.ndim != 3 or emb_j.ndim != 3:
             raise ValueError(
                 f"MultiLayerEdgeClassifier expects emb_i, emb_j with ndim 2 or 3, got {emb_i.shape}, {emb_j.shape}"
@@ -184,35 +191,28 @@ class MultiLayerEdgeClassifier(nn.Module):
 
         B, L, E = emb_i.shape
         if E != self.emb_dim:
-            raise ValueError(
-                f"Expected embedding dim={self.emb_dim}, got {E} (shape={emb_i.shape})"
-            )
+            raise ValueError(f"Expected embedding dim={self.emb_dim}, got {E} (shape={emb_i.shape})")
 
-        # Compute indices for first, middle, last layers (robust to small L)
+        # Pick representative layers
         idx_first = 0
-        idx_last = max(0, L - 1)
         idx_mid = L // 2
+        idx_last = L - 1
 
-        # Gather layer-wise embeddings
-        e_i_first = emb_i[:, idx_first, :]  # (B, E)
-        e_j_first = emb_j[:, idx_first, :]
+        # Extract layer embeddings
+        e_i_first, e_j_first = emb_i[:, idx_first, :], emb_j[:, idx_first, :]
+        e_i_mid, e_j_mid = emb_i[:, idx_mid, :], emb_j[:, idx_mid, :]
+        e_i_last, e_j_last = emb_i[:, idx_last, :], emb_j[:, idx_last, :]
 
-        e_i_mid = emb_i[:, idx_mid, :]
-        e_j_mid = emb_j[:, idx_mid, :]
+        # Encode pairs at each scale
+        h_first = self._encode_pair(e_i_first, e_j_first, self.pair_ln_low, self.pair_mlp_low)
+        h_mid = self._encode_pair(e_i_mid, e_j_mid, self.pair_ln_mid, self.pair_mlp_mid)
+        h_last = self._encode_pair(e_i_last, e_j_last, self.pair_ln_high, self.pair_mlp_high)
 
-        e_i_last = emb_i[:, idx_last, :]
-        e_j_last = emb_j[:, idx_last, :]
+        # Fuse features (learned combination instead of mean)
+        h_cat = torch.cat([h_first, h_mid, h_last], dim=-1)  # (B, 3 * hidden_dim // 2)
+        h_fused = self.fusion_mlp(h_cat)
 
-        # Encode each layer's pair with its own MLP
-        h_first = self._encode_pair(e_i_first, e_j_first, self.pair_mlp_low)   # low
-        h_mid = self._encode_pair(e_i_mid, e_j_mid, self.pair_mlp_mid)         # mid
-        h_last = self._encode_pair(e_i_last, e_j_last, self.pair_mlp_high)     # high
-
-        # Aggregate (B, 3, hidden_dim // 2) → (B, hidden_dim // 2)
-        h_stack = torch.stack([h_first, h_mid, h_last], dim=1)
-        h_agg = h_stack.mean(dim=1)
-
-        logits = self.final_mlp(h_agg).squeeze(-1)  # (B,)
+        logits = self.final_mlp(h_fused).squeeze(-1)  # (B,)
         return logits
 
 def pairwise_ranking_loss(
