@@ -4,6 +4,7 @@ data/
 vggt/
 old/
 keys/
+wandb/
 TODO.txt
 
 # Byte-compiled / optimized / DLL files
