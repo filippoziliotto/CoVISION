@@ -23,9 +23,9 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------
-# Dataset import: load_dataset.py
+# Dataset import: load_dataset_pairs.py
 # ---------------------------------------------------------------------
-from dataset.load_dataset import build_dataloaders
+from dataset.load_dataset_pairs import build_dataloaders_pairs
 
 warnings.filterwarnings("ignore")
 
@@ -46,8 +46,9 @@ def set_seed(seed: int) -> None:
 # ---------------------------------------------------------------------
 class EdgeClassifier(nn.Module):
     """
-    Takes two node embeddings e_i, e_j (E-dim each) and predicts edge strength in [0,1].
+    Takes two node embeddings e_i, e_j (E-dim each) and predicts edge strength (logit).
     """
+
     def __init__(self, emb_dim: int, hidden_dim: int = 256, dropout_p=0.2):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -58,14 +59,13 @@ class EdgeClassifier(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim // 2, 1),
             nn.Dropout(p=dropout_p),
-            #nn.Sigmoid(),  # output in [0,1]
         )
         self.layernorm = nn.LayerNorm(4 * emb_dim)
 
     def forward(self, emb_i: torch.Tensor, emb_j: torch.Tensor) -> torch.Tensor:
         """
         emb_i, emb_j:
-            - shape (B, E)  for single-layer embeddings
+            - shape (B, E)   for single-layer embeddings
             - or    (B, L, E) for multi-layer embeddings (L layers)
 
         Returns:
@@ -215,6 +215,7 @@ class MultiLayerEdgeClassifier(nn.Module):
         logits = self.final_mlp(h_fused).squeeze(-1)  # (B,)
         return logits
 
+
 def pairwise_ranking_loss(
     scores: torch.Tensor,
     strengths: torch.Tensor,
@@ -224,11 +225,7 @@ def pairwise_ranking_loss(
     """
     Pairwise ranking loss: if strength_i > strength_j + margin,
     encourage score_i > score_j by at least `margin`.
-
-    scores:    (B,) raw logits (or scores)
-    strengths: (B,) continuous edge strengths (e.g., from rel_mat)
     """
-    # Ensure 1D
     scores = scores.view(-1)
     strengths = strengths.view(-1)
 
@@ -236,14 +233,12 @@ def pairwise_ranking_loss(
     if B < 2:
         return torch.tensor(0.0, device=scores.device)
 
-    # Randomly sample index pairs
     idx1 = torch.randint(0, B, (num_samples,), device=scores.device)
     idx2 = torch.randint(0, B, (num_samples,), device=scores.device)
 
     s1 = strengths[idx1]
     s2 = strengths[idx2]
 
-    # Keep only pairs where strength_i is significantly higher than strength_j
     mask = s1 > (s2 + margin)
     if mask.sum() == 0:
         return torch.tensor(0.0, device=scores.device)
@@ -251,16 +246,16 @@ def pairwise_ranking_loss(
     idx1 = idx1[mask]
     idx2 = idx2[mask]
 
-    # Scores should respect the same ordering
-    score_diff = scores[idx1] - scores[idx2]  # want this > margin
+    score_diff = scores[idx1] - scores[idx2]
     loss = F.relu(margin - score_diff).mean()
     return loss
+
 
 # ---------------------------------------------------------------------
 # Training / eval loops
 # ---------------------------------------------------------------------
 def train_epoch(
-    classifier: EdgeClassifier,
+    classifier: nn.Module,
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: str = "cpu",
@@ -283,10 +278,10 @@ def train_epoch(
     total_soft_iou = 0.0
 
     for batch_idx, batch in enumerate(tqdm(train_loader, desc="Training Progress")):
-        # Support (feat_i, feat_j, labels) or (feat_i, feat_j, labels, strengths)
+        # batch: (feat_i, feat_j, labels) or (feat_i, feat_j, labels, strengths)
         if len(batch) == 3:
             feat_i, feat_j, labels = batch
-            strengths = labels  # fallback: same as binary
+            strengths = labels
         else:
             feat_i, feat_j, labels, strengths = batch
 
@@ -294,8 +289,8 @@ def train_epoch(
         feat_j = feat_j.to(device)
         labels = labels.to(device)
         strengths = strengths.to(device)
-        
-        # 1) Randomly swap (feat_i, feat_j) for some pairs
+
+        # Random swap augmentation
         if aug_swap_prob > 0.0:
             swap_mask = (torch.rand(labels.size(0), device=device) < aug_swap_prob)
             if swap_mask.any():
@@ -305,12 +300,12 @@ def train_epoch(
 
         preds = classifier(feat_i, feat_j)  # (B,)
 
-        # Main BCE loss on binary labels
+        # Main BCE loss
         loss_bce = criterion(preds, labels)
 
-        # Optional regression loss on continuous strengths from rel_mat
+        # Optional regression loss on strengths
         if use_reg_loss:
-            probs = torch.sigmoid(preds)  # (B,) in [0,1]
+            probs = torch.sigmoid(preds)
             loss_reg = F.mse_loss(probs, strengths)
             loss = loss_bce + reg_lambda * loss_reg
         else:
@@ -319,7 +314,6 @@ def train_epoch(
 
         # Optional soft IoU loss
         if use_iou_loss:
-            # Only compute probs if not already done
             if not use_reg_loss:
                 probs = torch.sigmoid(preds)
             eps = 1e-6
@@ -330,7 +324,6 @@ def train_epoch(
             loss = loss + iou_lambda * loss_iou
         else:
             loss_iou = torch.tensor(0.0, device=preds.device)
-            # still define soft_iou for logging
             if not use_reg_loss:
                 probs = torch.sigmoid(preds)
             eps = 1e-6
@@ -338,10 +331,9 @@ def train_epoch(
             soft_union = probs.sum() + labels.sum() - soft_inter + eps
             soft_iou = soft_inter / soft_union
 
-        # Accumulate total_soft_iou
         total_soft_iou += soft_iou.item() * labels.numel()
 
-        # Optional pairwise ranking loss on continuous strengths
+        # Optional ranking loss
         if use_rank_loss:
             loss_rank = pairwise_ranking_loss(
                 scores=preds,
@@ -383,18 +375,13 @@ def train_epoch(
 
 @torch.no_grad()
 def eval_epoch(
-    classifier: EdgeClassifier,
+    classifier: nn.Module,
     val_loader: DataLoader,
     device: str = "cpu",
     use_reg_loss: bool = False,
     reg_lambda: float = 1.0,
     use_iou_loss: bool = False,
 ):
-    """Evaluate classifier on validation loader.
-
-    Uses BCEWithLogitsLoss on raw logits and computes metrics on
-    sigmoid probabilities in [0,1].
-    """
     classifier.eval()
     criterion = nn.BCEWithLogitsLoss()
 
@@ -404,7 +391,7 @@ def eval_epoch(
     for batch in tqdm(val_loader, desc="Validation Progress"):
         if len(batch) == 3:
             feat_i, feat_j, labels = batch
-            strengths = labels  # fallback
+            strengths = labels
         else:
             feat_i, feat_j, labels, strengths = batch
 
@@ -413,13 +400,12 @@ def eval_epoch(
         labels = labels.to(device)
         strengths = strengths.to(device)
 
-        logits = classifier(feat_i, feat_j)  # (B,) raw logits
+        logits = classifier(feat_i, feat_j)  # (B,)
 
         all_logits.append(logits.detach().cpu())
         all_labels.append(labels.detach().cpu())
         all_strengths.append(strengths.detach().cpu())
 
-        # For per-batch metrics, threshold at 0.5 on sigmoid outputs
         probs = torch.sigmoid(logits)
         y_pred = (probs >= 0.5).float().cpu().numpy()
         y_true = (labels >= 0.5).float().cpu().numpy()
@@ -436,17 +422,16 @@ def eval_epoch(
             graph_iou_best=np.nan,
             graph_iou_auc=np.nan,
             graph_iou_best_thres=np.nan,
+            iou_thresholds=None,
+            iou_curve=None,
+            soft_iou=np.nan,
         )
 
-    # Stack all logits and labels
-    logits_all = torch.cat(all_logits, dim=0)      # (N,)
-    labels_all = torch.cat(all_labels, dim=0)      # (N,)
-    strengths_all = torch.cat(all_strengths, dim=0)  # (N,)
+    logits_all = torch.cat(all_logits, dim=0)
+    labels_all = torch.cat(all_labels, dim=0)
+    strengths_all = torch.cat(all_strengths, dim=0)
 
-    # Main BCE loss
     loss_bce = criterion(logits_all, labels_all)
-
-    # Optional regression loss
     if use_reg_loss:
         probs_all_t = torch.sigmoid(logits_all)
         loss_reg = F.mse_loss(probs_all_t, strengths_all)
@@ -456,11 +441,9 @@ def eval_epoch(
 
     loss = loss.item()
 
-    # Probabilities in [0,1] for metrics
     probs_all = torch.sigmoid(logits_all).cpu().numpy()
     y_true = labels_all.cpu().numpy()
 
-    # Binary metrics at threshold 0.5
     y_bin = (probs_all >= 0.5).astype(np.float32)
     y_true_bin = (y_true >= 0.5).astype(np.float32)
     acc = np.mean(accs)
@@ -480,7 +463,7 @@ def eval_epoch(
         except Exception:
             pr_auc = np.nan
 
-    # Graph IoU sweep and AUC over thresholds in [0,1]
+    # Graph IoU sweep
     thresholds = np.linspace(0.0, 1.0, 100)
     ious = []
     eps = 1e-6
@@ -502,9 +485,8 @@ def eval_epoch(
     thresholds_arr = np.asarray(thresholds, dtype=np.float32)
     ious_arr = np.asarray(ious, dtype=np.float32)
 
-    # Soft IoU (batch-level, not thresholded)
+    # Soft IoU (batch-level)
     if use_iou_loss:
-        # Use sigmoid probs and true labels
         probs_torch = torch.sigmoid(logits_all)
         labels_torch = labels_all
         eps = 1e-6
@@ -538,8 +520,7 @@ def zero_shot_eval(
     device: str = "cpu",
 ):
     """
-    Zero-shot evaluation: no classifier, just use cosine similarity between
-    precomputed embeddings as edge scores.
+    Zero-shot evaluation: cosine similarity between precomputed embeddings.
     """
     criterion = nn.BCELoss()
 
@@ -550,29 +531,24 @@ def zero_shot_eval(
         if len(batch) == 3:
             feat_i, feat_j, labels = batch
         else:
-            feat_i, feat_j, labels, _ = batch  # ignore strengths
+            feat_i, feat_j, labels, _ = batch
 
         feat_i = feat_i.to(device)
         feat_j = feat_j.to(device)
         labels = labels.to(device)
 
-        # Cosine similarity:
-        # - if features are (B, E): one similarity per pair
-        # - if features are (B, L, E): one similarity per layer, then averaged.
         if feat_i.ndim == 2:
-            sims = F.cosine_similarity(feat_i, feat_j, dim=-1)  # (B,)
+            sims = F.cosine_similarity(feat_i, feat_j, dim=-1)
         elif feat_i.ndim == 3:
-            # Normalize along feature dim, compute per-layer sims, then average over L
             feat_i_norm = F.normalize(feat_i, dim=-1)
             feat_j_norm = F.normalize(feat_j, dim=-1)
             sims_layer = (feat_i_norm * feat_j_norm).sum(dim=-1)  # (B, L)
-            sims = sims_layer.mean(dim=1)  # (B,)
+            sims = sims_layer.mean(dim=1)
         else:
             raise ValueError(
                 f"Unexpected feature shapes in zero_shot_eval: {feat_i.shape}, {feat_j.shape}"
             )
 
-        # Map to [0, 1] to be comparable to probabilities
         preds = (sims + 1.0) / 2.0
 
         all_scores.append(preds.cpu().numpy())
@@ -593,24 +569,23 @@ def zero_shot_eval(
             graph_iou_best=np.nan,
             graph_iou_auc=np.nan,
             graph_iou_best_thres=np.nan,
+            iou_thresholds=None,
+            iou_curve=None,
         )
 
     y_scores = np.concatenate(all_scores, axis=0)
     y_true = np.concatenate(all_labels, axis=0)
 
-    # "Loss" here is just BCE between mapped similarities and labels
     loss = criterion(
         torch.from_numpy(y_scores.astype(np.float32)),
         torch.from_numpy(y_true.astype(np.float32)),
     ).item()
 
-    # Binary metrics at 0.5
     y_bin = (y_scores >= 0.5).astype(np.float32)
     y_true_bin = (y_true >= 0.5).astype(np.float32)
     acc = np.mean(accs)
     f1 = np.mean(f1s)
 
-    # ROC/PR AUC
     if len(np.unique(y_true_bin)) < 2 or len(np.unique(y_scores)) < 2:
         roc_auc = np.nan
         pr_auc = np.nan
@@ -624,7 +599,6 @@ def zero_shot_eval(
         except Exception:
             pr_auc = np.nan
 
-    # Graph IoU sweep and AUC over thresholds
     thresholds = np.linspace(0.0, 1.0, 100)
     ious = []
     eps = 1e-6
@@ -659,12 +633,13 @@ def zero_shot_eval(
         iou_curve=ious_arr,
     )
 
+
 # ---------------------------------------------------------------------
 # Main script
 # ---------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="Train EdgeClassifier on precomputed embeddings/adjacency (CoVisGraphDataset)"
+        description="Train EdgeClassifier on pair-level VGGT embeddings (pairs.npz)"
     )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -673,34 +648,29 @@ def main():
         type=str,
         default="adamw",
         choices=["adam", "adamw"],
-        help="Optimizer type.",
     )
     parser.add_argument(
         "--weight_decay",
         type=float,
         default=5e-5,
-        help="Weight decay (L2 regularization).",
     )
     parser.add_argument(
         "--batch_size",
         type=int,
         default=32,
-        help="Batch size (number of graphs per batch).",
     )
     parser.add_argument(
         "--max_neg_ratio",
         type=float,
         default=1.0,
-        help="Max negative:positive ratio for edge pairs.",
     )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", type=str, default="mps")
-    parser.add_argument("--out_dir", type=str, default="train/classifier")
+    parser.add_argument("--out_dir", type=str, default="train/classifier_pairs")
     parser.add_argument(
         "--max_grad_norm",
         type=float,
         default=0.0,
-        help="Max gradient norm for clipping (0.0 disables clipping).",
     )
     # Wandb
     parser.add_argument("--wandb_project", type=str, default="Co-Vision")
@@ -708,102 +678,86 @@ def main():
     parser.add_argument(
         "--wandb_off",
         action="store_true",
-        help="Disable wandb logging",
     )
     # Early stopping + LR scheduler
     parser.add_argument(
         "--es_patience",
         type=int,
         default=5,
-        help="Early stopping patience (epochs without Graph IoU AUC improvement).",
     )
     parser.add_argument(
         "--es_min_delta",
         type=float,
         default=1e-4,
-        help="Minimum improvement in val Graph IoU AUC to reset early stopping.",
     )
     parser.add_argument(
         "--lr_factor",
         type=float,
         default=0.5,
-        help="Factor to reduce LR on plateau (ReduceLROnPlateau).",
     )
     parser.add_argument(
         "--lr_patience",
         type=int,
         default=3,
-        help="LR scheduler patience in epochs (ReduceLROnPlateau).",
     )
     parser.add_argument(
         "--zero_shot",
         action="store_true",
-        help="If set, run zero-shot evaluation using cosine similarity only (no training).",
+        help="If set, run zero-shot eval (cosine similarity) only.",
     )
     parser.add_argument(
         "--aug_swap_prob",
         type=float,
         default=0.5,
-        help="Probability of swapping node pairs as data augmentation during training.",
     )
     parser.add_argument(
         "--use_reg_loss",
         action="store_true",
-        help="If set, add auxiliary regression loss to continuous edge strengths (rel_mat).",
     )
     parser.add_argument(
         "--reg_lambda",
         type=float,
         default=0.3,
-        help="Weight for the regression loss term.",
     )
     parser.add_argument(
         "--use_rank_loss",
         action="store_true",
-        help="If set, add a pairwise ranking loss based on continuous edge strengths.",
     )
     parser.add_argument(
         "--rank_lambda",
         type=float,
         default=0.1,
-        help="Weight for the ranking loss term.",
     )
     parser.add_argument(
         "--rank_margin",
         type=float,
         default=0.1,
-        help="Margin for the ranking loss on score differences.",
     )
     parser.add_argument(
         "--rank_num_samples",
         type=int,
         default=1024,
-        help="Number of pairwise constraints sampled per batch for ranking loss.",
     )
     parser.add_argument(
         "--layer_mode",
         type=str,
         default="1st_last",
         choices=["all", "1st_last", "2nd_last", "3rd_last", "4th_last"],
-        help="Which VGGT layer(s) to use: 'all' or one of the last-k layers.",
     )
     parser.add_argument(
         "--data_split_mode",
         type=str,
         default="scene_disjoint",
         choices=["scene_disjoint", "version_disjoint", "graph"],
-        help="Split mode: 'scene_disjoint' (default), 'version_disjoint', or 'graph'."
     )
     parser.add_argument(
         "--use_iou_loss",
         action="store_true",
-        help="If set, add a batch-level soft IoU loss term."
     )
     parser.add_argument(
         "--iou_lambda",
         type=float,
         default=0.3,
-        help="Weight for the soft IoU loss term."
     )
     args = parser.parse_args()
 
@@ -842,8 +796,8 @@ def main():
             print(f"[WARN] Failed to initialize wandb ({e}). Disabling wandb logging.")
             use_wandb = False
 
-    # Build dataloaders
-    train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders(
+    # Build dataloaders (pair-level)
+    train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders_pairs(
         batch_size=args.batch_size,
         seed=args.seed,
         num_workers=4,
@@ -860,7 +814,7 @@ def main():
         f"val_pairs={len(val_ds)}"
     )
     print(
-        f"[INFO] Graphs: total={meta['num_graphs']}, "
+        f"[INFO] Pair graphs: total={meta['num_graphs']}, "
         f"train={meta['num_train_graphs']}, val={meta['num_val_graphs']}"
     )
     print(
@@ -868,7 +822,7 @@ def main():
         f"train={meta['num_train_scenes']}, val={meta['num_val_scenes']}"
     )
 
-    # Zero-shot mode: just evaluate cosine similarity between embeddings
+    # Zero-shot mode
     if args.zero_shot:
         print("[INFO] Running zero-shot evaluation (no training).")
 
@@ -894,7 +848,6 @@ def main():
             f"graph_iou_auc={val_metrics['graph_iou_auc']:.3f}"
         )
 
-        # Plot IoU vs threshold for zero-shot train/val
         zs_plots_dir = os.path.join(args.out_dir, "zero_shot_plots")
         os.makedirs(zs_plots_dir, exist_ok=True)
 
@@ -904,7 +857,6 @@ def main():
         iou_val = val_metrics.get("iou_curve", None)
 
         if thr_train is not None and iou_train is not None and thr_val is not None and iou_val is not None:
-            # Use validation thresholds for x-axis if both are the same length
             x_thr = thr_val if thr_val.shape == thr_train.shape else thr_val
             plt.figure(figsize=(6, 4))
             plt.plot(x_thr, iou_train, label="train")
@@ -918,8 +870,7 @@ def main():
             plt.close()
 
         if use_wandb:
-            import wandb as _wandb_mod
-            _wandb_mod.log(
+            wandb.log(
                 {
                     "zero_shot_train_acc": train_metrics["acc"],
                     "zero_shot_train_f1": train_metrics["f1"],
@@ -935,13 +886,13 @@ def main():
                     "zero_shot_val_graph_iou_auc": val_metrics["graph_iou_auc"],
                 }
             )
-            _wandb_mod.finish()
+            wandb.finish()
 
         return
 
-    # Infer emb_dim from first sample
+    # Infer emb_dim
     first_batch = next(iter(train_loader))
-    feat_i_batch = first_batch[0]  # (B, E) or (B, L, E)
+    feat_i_batch = first_batch[0]
     if feat_i_batch.ndim == 2:
         emb_dim = feat_i_batch.shape[1]
     elif feat_i_batch.ndim == 3:
@@ -950,11 +901,9 @@ def main():
         raise ValueError(f"Unexpected feature batch shape: {feat_i_batch.shape}")
     print(f"[INFO] Embedding dim: {emb_dim}")
 
-    classifier = EdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
-    # swap to multi-layer
-    #classifier = MultiLayerEdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
-    
-    # Trainable parameters
+    # classifier = EdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
+    classifier = MultiLayerEdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
+
     n_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
     print(f"[INFO] Trainable parameters: {n_params}")
 
@@ -974,20 +923,17 @@ def main():
         f"(lr={args.lr}, weight_decay={args.weight_decay})"
     )
 
-    # LR scheduler (ReduceLROnPlateau on validation Graph IoU AUC)
+    # LR scheduler on val Graph IoU AUC
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        mode="max",  # maximize val_graph_iou_auc
+        mode="max",
         factor=args.lr_factor,
         patience=args.lr_patience,
-        #verbose=True,
     )
 
-    # Early stopping state (based on val_graph_iou_auc, higher is better)
     best_val_graph_iou_auc = -float("inf")
     epochs_no_improve = 0
 
-    # History tracking for metrics
     history = {
         "train_loss": [],
         "val_loss": [],
@@ -1023,7 +969,6 @@ def main():
             rank_margin=args.rank_margin,
             rank_num_samples=args.rank_num_samples,
         )
-        # Evaluate on training set for IoU curve (no gradient)
         train_eval_metrics = eval_epoch(
             classifier,
             train_loader,
@@ -1055,10 +1000,8 @@ def main():
             f"val_graph_iou_auc={val_metrics['graph_iou_auc']:.3f}"
         )
 
-        # Step LR scheduler on validation Graph IoU AUC
         scheduler.step(val_metrics["graph_iou_auc"])
 
-        # Early stopping logic based on validation Graph IoU AUC
         current_val_iou_auc = val_metrics["graph_iou_auc"]
         if (
             not np.isnan(current_val_iou_auc)
@@ -1066,7 +1009,6 @@ def main():
         ):
             best_val_graph_iou_auc = current_val_iou_auc
             epochs_no_improve = 0
-            # Optionally, you could save a "best" checkpoint here
         else:
             epochs_no_improve += 1
 
@@ -1100,7 +1042,6 @@ def main():
                 step=epoch,
             )
 
-        # Append history
         history["train_loss"].append(train_metrics["loss"])
         history["val_loss"].append(val_metrics["loss"])
         history["train_acc"].append(train_metrics["acc"])
@@ -1116,7 +1057,7 @@ def main():
         history["train_soft_iou"].append(train_metrics["soft_iou"])
         history["val_soft_iou"].append(val_metrics["soft_iou"])
 
-        # Plot per-epoch Graph IoU vs threshold for train and val
+        # Per-epoch IoU curves
         thr_train = train_eval_metrics.get("iou_thresholds", None)
         iou_train = train_eval_metrics.get("iou_curve", None)
         thr_val = val_metrics.get("iou_thresholds", None)
@@ -1125,7 +1066,6 @@ def main():
         if thr_train is not None and iou_train is not None and thr_val is not None and iou_val is not None:
             plots_dir = os.path.join(args.out_dir, "plots")
             os.makedirs(plots_dir, exist_ok=True)
-            # Use validation thresholds for x-axis if shapes match, otherwise use validation's
             x_thr = thr_val if thr_val.shape == thr_train.shape else thr_val
             plt.figure(figsize=(6, 4))
             plt.plot(x_thr, iou_train, label="train")
@@ -1136,11 +1076,9 @@ def main():
             plt.legend()
             plt.tight_layout()
             plt.savefig(os.path.join(plots_dir, f"iou_curve_epoch_{epoch:03d}.png"), dpi=200)
-            # Also overwrite a 'latest' curve for convenience
             plt.savefig(os.path.join(plots_dir, "iou_curve_latest.png"), dpi=200)
             plt.close()
 
-        # Early stopping check
         if epochs_no_improve >= args.es_patience:
             print(
                 f"[EarlyStopping] No improvement in val Graph IoU AUC "
@@ -1148,14 +1086,12 @@ def main():
             )
             break
 
-    # Save plots of metrics
+    # Final plots
     plots_dir = os.path.join(args.out_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
     num_epochs = len(history["train_loss"])
-    if num_epochs == 0:
-        print("[WARN] No epochs logged, skipping plots.")
-    else:
+    if num_epochs > 0:
         epochs = np.arange(1, num_epochs + 1)
 
         # Loss
@@ -1194,7 +1130,7 @@ def main():
         plt.savefig(os.path.join(plots_dir, "f1.png"), dpi=200)
         plt.close()
 
-        # ROC AUC (val)
+        # ROC AUC
         plt.figure(figsize=(6, 4))
         plt.plot(epochs, history["val_roc_auc"], label="val")
         plt.xlabel("Epoch")
@@ -1205,7 +1141,7 @@ def main():
         plt.savefig(os.path.join(plots_dir, "roc_auc.png"), dpi=200)
         plt.close()
 
-        # Graph IoU (best)
+        # Graph IoU best
         plt.figure(figsize=(6, 4))
         plt.plot(epochs, history["val_graph_iou_best"], label="val")
         plt.xlabel("Epoch")
@@ -1241,7 +1177,7 @@ def main():
             plt.close()
 
     # Save classifier
-    clf_path = os.path.join(args.out_dir, "edge_classifier.pth")
+    clf_path = os.path.join(args.out_dir, "edge_classifier_pairs.pth")
     torch.save(
         {
             "classifier_state_dict": classifier.state_dict(),

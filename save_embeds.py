@@ -16,30 +16,28 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # ---------------------------------------------------------------------
 # Paths / constants (mirroring vggt_feat_eval.py)
 # ---------------------------------------------------------------------
-HM3D_ROOT_CANDIDATE = "data/scratch/cc7287/mvdust3r_projects/HM3D/nooooooo"
-GIBSON_ROOT_CANDIDATE = "data/vast/cc7287/gvgg-1"
+HM3D_ROOT_CANDIDATE = "data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg"
+GIBSON_ROOT_CANDIDATE = "data/vast/cc7287/gvgg-3"
 
-if os.path.isdir(HM3D_ROOT_CANDIDATE):
-    # Use HM3D
-    USE_HM3D = False
-    HM3D_ROOT = os.path.join(HM3D_ROOT_CANDIDATE, "dust3r_vpr_mask/data/hvgg/parta/")
-    HVGG_ROOT = HM3D_ROOT
-    MORE_VIS_ROOT = os.path.join(HVGG_ROOT, "temp/More_vis")
+USE_HM3D = True
+HVGG_ROOT = None
+MORE_VIS_ROOT = None
+
+if USE_HM3D:
+    # Default to HM3D if present
+    USE_HM3D = True
+    HVGG_ROOT = HM3D_ROOT_CANDIDATE
+    MORE_VIS_ROOT = HVGG_ROOT
     BASE_CSV_NAME = "GroundTruth"
-elif os.path.isdir(GIBSON_ROOT_CANDIDATE):
-    # Use Gibson
+else:
+    # Fallback to Gibson
     USE_HM3D = False
     GIBSON_ROOT = GIBSON_ROOT_CANDIDATE
     HVGG_ROOT = GIBSON_ROOT
-    MORE_VIS_ROOT = os.path.join(GIBSON_ROOT)
+    MORE_VIS_ROOT = GIBSON_ROOT
     BASE_CSV_NAME = "GroundTruth"
-else:
-    raise RuntimeError(
-        "Could not find either HM3D or Gibson dataset root. "
-        f"Checked: '{HM3D_ROOT_CANDIDATE}' and '{GIBSON_ROOT_CANDIDATE}'"
-    )
 
-PRED_ROOT = "data/predictions_feat"
+PRED_ROOT = "data/predictions_feat/hvgg" if USE_HM3D else "data/predictions_feat/gvgg"
 
 # ---------------------------------------------------------------------
 # VGGT imports
@@ -289,35 +287,32 @@ def main():
     parser.add_argument(
         "--use_scene",
         choices=["hm3d", "gibson"],
-        default="gibson",
+        default="hm3d",
         help="Override automatic dataset detection and use the specified scene dataset.",
     )
     args = parser.parse_args()
 
     # Override dataset selection if requested
-    if args.use_scene == "hm3dnooo":
+    if USE_HM3D:
         USE_HM3D = True
-        HM3D_ROOT = os.path.join(
-            "data/scratch/cc7287/mvdust3r_projects/HM3D",
-            "dust3r_vpr_mask/data/hvgg/parta/",
-        )
-        HVGG_ROOT = HM3D_ROOT
-        MORE_VIS_ROOT = os.path.join(HVGG_ROOT, "temp", "More_vis")
+        HVGG_ROOT = "data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg"
+        MORE_VIS_ROOT = HVGG_ROOT
         BASE_CSV_NAME = "GroundTruth"
         print("[INFO] Overriding: using HM3D dataset.")
-    elif args.use_scene == "gibson":
+    else:
         USE_HM3D = False
-        GIBSON_ROOT = "data/vast/cc7287/gvgg-1"
+        GIBSON_ROOT = "data/vast/cc7287/gvgg-3"
         HVGG_ROOT = GIBSON_ROOT
-        MORE_VIS_ROOT = os.path.join(GIBSON_ROOT)
+        MORE_VIS_ROOT = GIBSON_ROOT
         BASE_CSV_NAME = "GroundTruth"
         print("[INFO] Overriding: using Gibson dataset.")
-    else:
-        print("[INFO] Using automatic dataset detection.")
         if USE_HM3D:
             print("[INFO] Auto-detected: using HM3D dataset.")
         else:
             print("[INFO] Auto-detected: using Gibson dataset.")
+
+    global PRED_ROOT
+    PRED_ROOT = "data/predictions_feat/hvgg" if USE_HM3D else "data/predictions_feat/gvgg"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[INFO] Using device: {device}")
@@ -330,13 +325,28 @@ def main():
     # Collect scene dirs (same logic as vggt_feat_eval.py)
     scene_dirs = []
     if USE_HM3D:
-        # HM3D: .basis dirs
-        for name in sorted(os.listdir(MORE_VIS_ROOT)):
-            if not name.endswith(".basis"):
+        # HM3D: hvgg/part{letter}/temp/More_vis/{scene_id}.basis/{split}/saved_obs
+        hm3d_parts = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "l"]
+        for part in hm3d_parts:
+            part_root = os.path.join(HVGG_ROOT, f"part{part}", "temp", "More_vis")
+            if not os.path.isdir(part_root):
                 continue
-            full_path = os.path.join(MORE_VIS_ROOT, name)
-            if os.path.isdir(full_path):
-                scene_dirs.append(full_path)
+            for name in sorted(os.listdir(part_root)):
+                scene_path = os.path.join(part_root, name)
+                if not os.path.isdir(scene_path):
+                    continue
+                # Only keep scenes that actually have saved_obs in some split
+                found = False
+                for split_name in os.listdir(scene_path):
+                    split_path = os.path.join(scene_path, split_name)
+                    if not os.path.isdir(split_path):
+                        continue
+                    saved_obs = os.path.join(split_path, "saved_obs")
+                    if os.path.isdir(saved_obs):
+                        found = True
+                        break
+                if found:
+                    scene_dirs.append(scene_path)
     else:
         # Gibson: look under More_vis or temp/More_vis
         gibson_roots = []
@@ -352,7 +362,7 @@ def main():
         import fnmatch
         for root in gibson_roots:
             for name in sorted(os.listdir(root)):
-                if not fnmatch.fnmatch(name, "*1"):
+                if not fnmatch.fnmatch(name, "*3"):
                     continue
                 scene_path = os.path.join(root, name)
                 if not os.path.isdir(scene_path):

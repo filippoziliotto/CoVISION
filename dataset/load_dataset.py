@@ -11,48 +11,55 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.utils import shuffle as sk_shuffle
 import argparse
 
-
-PRED_ROOT = "data/predictions_feat"
+USE_HM3D = False  # Set to True to use HM3D paths
+if USE_HM3D:
+    PRED_ROOT = "data/predictions_feat/hvgg"
+else:
+    PRED_ROOT = "data/predictions_feat/gvgg"
 GIBSON_BASE_PATTERN = "data/vast/cc7287/gvgg-{i}"  # i in [1..5]
+HM3D_BASE_PATTERN = "data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg/part{i}"  # i in [a,b,c,d,e,f,g,h,i,l]
+HM3D_PARTS = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "l"]
 
 
 # -------------------------------------------------------
 # Utilities
 # -------------------------------------------------------
-def _discover_gibson_scene_splits() -> List[Dict]:
+def _discover_scene_splits() -> List[Dict]:
     """
-    Walk gvgg-1..5 and find all (scene_version, split_id, root_path).
+    Discover all (scene_version, split_id, saved_obs) across Gibson or HM3D,
+    depending on USE_HM3D.
 
     Returns list of dicts:
       {
-        "scene_version": "Adrian-3",
+        "scene_version": "Adrian-3" or "E1NrAhMoqvB",
         "split_id": "0",
-        "root": "/.../gvgg-3/temp/More_vis/Adrian-3/0/saved_obs"
+        "saved_obs": "/.../saved_obs"
       }
     """
     splits = []
 
-    for i in range(1, 6):
-        base_root = GIBSON_BASE_PATTERN.format(i=i)
-        # Most common layout: base_root/temp/More_vis
-        candidates = [
-            os.path.join(base_root, "temp", "More_vis"),
-            os.path.join(base_root, "More_vis"),
-        ]
-        candidates = [c for c in candidates if os.path.isdir(c)]
-        if not candidates:
-            continue
+    if USE_HM3D:
+        # HM3D: data/.../HM3D/dust3r_vpr_mask/data/hvgg/part{letter}/temp/More_vis/{scene_id}.basis/{split}/saved_obs
+        for part in HM3D_PARTS:
+            base_root = HM3D_BASE_PATTERN.format(i=part)
+            more_vis_root = os.path.join(base_root, "temp", "More_vis")
+            if not os.path.isdir(more_vis_root):
+                continue
 
-        for more_vis_root in candidates:
             for scene_name in sorted(os.listdir(more_vis_root)):
                 scene_dir = os.path.join(more_vis_root, scene_name)
                 if not os.path.isdir(scene_dir):
                     continue
+                if not scene_name.endswith(".basis"):
+                    continue
 
-                # scene_name should already include version suffix (e.g. Adrian-3)
+                scene_id = scene_name.split(".basis")[0]
+
                 for split_name in sorted(os.listdir(scene_dir)):
                     split_dir = os.path.join(scene_dir, split_name)
                     if not os.path.isdir(split_dir):
+                        continue
+                    if not split_name.isdigit():
                         continue
 
                     saved_obs = os.path.join(split_dir, "saved_obs")
@@ -65,19 +72,60 @@ def _discover_gibson_scene_splits() -> List[Dict]:
 
                     splits.append(
                         dict(
-                            scene_version=scene_name,
+                            scene_version=scene_id,
                             split_id=split_name,
                             saved_obs=saved_obs,
                         )
                     )
+    else:
+        # Gibson: data/vast/cc7287/gvgg-{i}/(temp/)?More_vis/{SceneName}-{version}/{split}/saved_obs
+        for i in range(1, 6):
+            base_root = GIBSON_BASE_PATTERN.format(i=i)
+            candidates = [
+                os.path.join(base_root, "temp", "More_vis"),
+                os.path.join(base_root, "More_vis"),
+            ]
+            candidates = [c for c in candidates if os.path.isdir(c)]
+            if not candidates:
+                continue
+
+            for more_vis_root in candidates:
+                for scene_name in sorted(os.listdir(more_vis_root)):
+                    scene_dir = os.path.join(more_vis_root, scene_name)
+                    if not os.path.isdir(scene_dir):
+                        continue
+
+                    for split_name in sorted(os.listdir(scene_dir)):
+                        split_dir = os.path.join(scene_dir, split_name)
+                        if not os.path.isdir(split_dir):
+                            continue
+                        if not split_name.isdigit():
+                            continue
+
+                        saved_obs = os.path.join(split_dir, "saved_obs")
+                        if not os.path.isdir(saved_obs):
+                            continue
+
+                        gt_csv = os.path.join(saved_obs, "GroundTruth.csv")
+                        if not os.path.isfile(gt_csv):
+                            continue
+
+                        splits.append(
+                            dict(
+                                scene_version=scene_name,
+                                split_id=split_name,
+                                saved_obs=saved_obs,
+                            )
+                        )
 
     return splits
 
 
 def _load_embeddings(scene_version: str, split_id: str) -> np.ndarray:
     """
-    Load embeddings from data/predictions_feat/{scene_version}/split_{split}/embs/all_embeds.npy
-    If only last_embeds.npy exists, treat it as a single-layer embedding (1, N, E).
+    Load embeddings for a given scene_version and split_id.
+    Tries new NPZ files first, then falls back to old NPY files.
+    Returns emb as (L, N, E) np.ndarray (float32).
     """
     emb_dir = os.path.join(
         PRED_ROOT,
@@ -85,23 +133,49 @@ def _load_embeddings(scene_version: str, split_id: str) -> np.ndarray:
         f"split_{split_id}",
         "embs",
     )
+    all_npz = os.path.join(emb_dir, "all_embeds_avgmax.npz")
+    last_npz = os.path.join(emb_dir, "last_embeds_avgmax.npz")
     all_path = os.path.join(emb_dir, "all_embeds.npy")
     last_path = os.path.join(emb_dir, "last_embeds.npy")
 
-    if os.path.isfile(all_path):
-        emb = np.load(all_path)
-        # Expect (L, N, E)
+    # 1. Try all_embeds_avgmax.npz
+    if os.path.isfile(all_npz):
+        data = np.load(all_npz)
+        if "all" in data.files:
+            emb = data["all"]
+        elif "arr_0" in data.files:
+            emb = data["arr_0"]
+        else:
+            raise ValueError(f"{all_npz} does not contain an 'all' array (found keys: {data.files})")
         if emb.ndim != 3:
-            raise ValueError(f"all_embeds.npy must be (L, N, E), got {emb.shape}")
+            raise ValueError(f"{all_npz}: expected shape (L, N, E), got {emb.shape}")
+    # 2. Try last_embeds_avgmax.npz
+    elif os.path.isfile(last_npz):
+        data = np.load(last_npz)
+        if "last" in data.files:
+            emb_last = data["last"]
+        elif "arr_0" in data.files:
+            emb_last = data["arr_0"]
+        else:
+            raise ValueError(f"{last_npz} does not contain a 'last' array (found keys: {data.files})")
+        if emb_last.ndim != 2:
+            raise ValueError(f"{last_npz}: expected shape (N, E), got {emb_last.shape}")
+        emb = emb_last[None, ...]  # expand to (1, N, E)
+    # 3. Try all_embeds.npy (old)
+    elif os.path.isfile(all_path):
+        emb = np.load(all_path)
+        if emb.ndim != 3:
+            raise ValueError(f"{all_path} must be (L, N, E), got {emb.shape}")
+    # 4. Try last_embeds.npy (old)
     elif os.path.isfile(last_path):
         emb_last = np.load(last_path)
         if emb_last.ndim != 2:
-            raise ValueError(f"last_embeds.npy must be (N, E), got {emb_last.shape}")
-        # Expand to a single layer: (1, N, E)
+            raise ValueError(f"{last_path} must be (N, E), got {emb_last.shape}")
         emb = emb_last[None, ...]
     else:
-        raise FileNotFoundError(f"Missing embeddings: {all_path} or {last_path}")
-
+        raise FileNotFoundError(
+            f"Missing embeddings: checked {all_npz}, {last_npz}, {all_path}, {last_path}"
+        )
     return emb.astype(np.float32)
 
 def _build_adjacency_from_gt(gt_csv_path: str, saved_obs_dir: str, N: int) -> np.ndarray:
@@ -341,9 +415,9 @@ def build_dataloaders(
         train_loader, val_loader, train_ds, val_ds, meta
     """
     # 1) Discover all splits
-    split_meta = _discover_gibson_scene_splits()
+    split_meta = _discover_scene_splits()
     if not split_meta:
-        raise RuntimeError("No Gibson splits found under gvgg-1..5")
+        raise RuntimeError("No scene splits found under dataset roots")
 
     # 2) Build graph objects with emb + adj + rel (if available)
     graphs = []

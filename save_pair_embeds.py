@@ -98,7 +98,7 @@ def extract_all_layer_embeds(predictions: dict) -> np.ndarray:
     layer_embs = []
     for feats_layer in feat_layers:
         # Reuse the same aggregation logic as in save_embeds.py
-        emb = make_image_embeddings(feats_layer)  # (S, E) where S = #views
+        emb = make_image_embeddings(feats_layer, mode="avg_max")  # (S, E) where S = #views
         layer_embs.append(emb.cpu().numpy().astype(np.float32))
 
     # Stack over layers → (L, S, E)
