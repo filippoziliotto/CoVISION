@@ -46,7 +46,6 @@ sys.path.append(os.path.abspath("vggt"))
 from vggt.vggt.models.vggt import VGGT
 from vggt.vggt.utils.load_fn import load_and_preprocess_images
 
-
 # ---------------------------------------------------------------------
 # Helper: build per-image embeddings from VGGT feature tensor
 # ---------------------------------------------------------------------
@@ -164,7 +163,6 @@ def make_image_embeddings(
 
     emb = F.normalize(emb.cpu(), dim=1)  # (N, D)
     return emb
-
 
 # ---------------------------------------------------------------------
 # Per-split: extract and save embeddings

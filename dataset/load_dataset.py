@@ -117,10 +117,10 @@ def _discover_scene_splits(dataset_type: str) -> List[Dict]:
     return splits
 
 
-def _load_embeddings(scene_version: str, split_id: str) -> np.ndarray:
+def _load_embeddings(scene_version: str, split_id: str, emb_mode: str = "avg_max") -> np.ndarray:
     """
     Load embeddings for a given scene_version and split_id.
-    Tries new NPZ files first, then falls back to old NPY files.
+    Tries NPZ files for the specified emb_mode first, then falls back to old NPY files.
     Returns emb as (L, N, E) np.ndarray (float32).
     """
     emb_dir = os.path.join(
@@ -129,12 +129,12 @@ def _load_embeddings(scene_version: str, split_id: str) -> np.ndarray:
         f"split_{split_id}",
         "embs",
     )
-    all_npz = os.path.join(emb_dir, "all_embeds_avgmax.npz")
-    last_npz = os.path.join(emb_dir, "last_embeds_avgmax.npz")
+    all_npz = os.path.join(emb_dir, f"all_embeds_{emb_mode}.npz")
+    last_npz = os.path.join(emb_dir, f"last_embeds_{emb_mode}.npz")
     all_path = os.path.join(emb_dir, "all_embeds.npy")
     last_path = os.path.join(emb_dir, "last_embeds.npy")
 
-    # 1. Try all_embeds_avgmax.npz
+    # 1. Try all_embeds_{emb_mode}.npz
     if os.path.isfile(all_npz):
         data = np.load(all_npz)
         if "all" in data.files:
@@ -145,7 +145,7 @@ def _load_embeddings(scene_version: str, split_id: str) -> np.ndarray:
             raise ValueError(f"{all_npz} does not contain an 'all' array (found keys: {data.files})")
         if emb.ndim != 3:
             raise ValueError(f"{all_npz}: expected shape (L, N, E), got {emb.shape}")
-    # 2. Try last_embeds_avgmax.npz
+    # 2. Try last_embeds_{emb_mode}.npz
     elif os.path.isfile(last_npz):
         data = np.load(last_npz)
         if "last" in data.files:
@@ -390,6 +390,7 @@ def build_dataloaders(
     hard_neg_rel_thr: float = 0.3,
     layer_mode: str = "1st_last",
     split_mode: str = "scene_disjoint",
+    emb_mode: str = "avg_max",
 ) -> Tuple[DataLoader, DataLoader, Dataset, Dataset, Dict]:
     """
     Discover all (scene_version, split) graphs across gvgg-1..5,
@@ -432,7 +433,7 @@ def build_dataloaders(
 
         # Embeddings
         try:
-            emb = _load_embeddings(scene_version, split_id)  # (N, E)
+            emb = _load_embeddings(scene_version, split_id, emb_mode=emb_mode)  # (N, E)
         except FileNotFoundError as e:
             print(f"[WARN] {e}")
             continue
@@ -562,6 +563,7 @@ def build_dataloaders(
         num_val_scenes=len(val_scenes),
         emb_dim=graphs[0]["emb"].shape[-1],
         split_mode=split_mode,
+        emb_mode=emb_mode,
     )
 
     print(
@@ -590,7 +592,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--split_mode",
         type=str,
-        default="version_disjoint",
+        default="scene_disjoint",
         choices=["scene_disjoint", "version_disjoint", "graph"],
         help="Split mode: 'scene_disjoint', 'version_disjoint', or 'graph'."
     )
@@ -599,9 +601,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_type",
         type=str,
-        default="gibson",
+        default="hm3d",
         choices=["gibson", "hm3d"],
         help="Dataset type: 'gibson' or 'hm3d'."
+    )
+    parser.add_argument(
+        "--emb_mode",
+        type=str,
+        default="avg_max",
+        choices=["avg", "avg_max", "chunked"],
+        help="Which embedding mode to load (matches save_embeds.py)."
     )
     args = parser.parse_args()
 
@@ -615,6 +624,7 @@ if __name__ == "__main__":
         hard_neg_rel_thr=args.hard_neg_rel_thr,
         layer_mode=args.layer_mode,
         split_mode=args.split_mode,
+        emb_mode=args.emb_mode,
     )
 
     print(f"[CHECK] Train dataset size: {len(train_ds)}")

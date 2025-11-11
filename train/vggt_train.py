@@ -26,235 +26,11 @@ import matplotlib.pyplot as plt
 # Dataset import: load_dataset.py
 # ---------------------------------------------------------------------
 from dataset.load_dataset import build_dataloaders
+from models.MultiView import EdgeClassifier, MultiLayerEdgeClassifier
+from utils.utils import set_seed, pairwise_ranking_loss
 
 warnings.filterwarnings("ignore")
 
-
-# ---------------------------------------------------------------------
-# Reproducibility
-# ---------------------------------------------------------------------
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-# ---------------------------------------------------------------------
-# Edge classifier head (trainable)
-# ---------------------------------------------------------------------
-class EdgeClassifier(nn.Module):
-    """
-    Takes two node embeddings e_i, e_j (E-dim each) and predicts edge strength in [0,1].
-    """
-    def __init__(self, emb_dim: int, hidden_dim: int = 256, dropout_p=0.2):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(4 * emb_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.Dropout(p=dropout_p),
-            nn.GELU(),
-            nn.Linear(hidden_dim // 2, 1),
-            nn.Dropout(p=dropout_p),
-            #nn.Sigmoid(),  # output in [0,1]
-        )
-        self.layernorm = nn.LayerNorm(4 * emb_dim)
-
-    def forward(self, emb_i: torch.Tensor, emb_j: torch.Tensor) -> torch.Tensor:
-        """
-        emb_i, emb_j:
-            - shape (B, E)  for single-layer embeddings
-            - or    (B, L, E) for multi-layer embeddings (L layers)
-
-        Returns:
-            - shape (B,) edge scores (logits)
-        """
-        if emb_i.ndim == 2:
-            # Single-layer case: (B, E)
-            x = torch.cat(
-                [emb_i, emb_j, torch.abs(emb_i - emb_j), emb_i * emb_j],
-                dim=-1,
-            )  # (B, 4E)
-            x = self.layernorm(x)
-            out = self.mlp(x).squeeze(-1)  # (B,)
-            return out
-
-        elif emb_i.ndim == 3:
-            # Multi-layer case: (B, L, E)
-            B, L, E = emb_i.shape
-            emb_i_flat = emb_i.reshape(B * L, E)
-            emb_j_flat = emb_j.reshape(B * L, E)
-
-            x = torch.cat(
-                [
-                    emb_i_flat,
-                    emb_j_flat,
-                    torch.abs(emb_i_flat - emb_j_flat),
-                    emb_i_flat * emb_j_flat,
-                ],
-                dim=-1,
-            )  # (B*L, 4E)
-            x = self.layernorm(x)
-            out_flat = self.mlp(x).squeeze(-1)  # (B*L,)
-
-            # Reshape back to (B, L) and average scores over layers
-            out = out_flat.view(B, L).mean(dim=1)  # (B,)
-            return out
-
-        else:
-            raise ValueError(
-                f"EdgeClassifier expected emb_i with ndim 2 or 3, got shape={emb_i.shape}"
-            )
-
-
-# ---------------------------------------------------------------------
-# MultiLayerEdgeClassifier: uses first, middle, last VGGT layers
-# ---------------------------------------------------------------------
-class MultiLayerEdgeClassifier(nn.Module):
-    """
-    Edge classifier that explicitly uses first, middle, and last VGGT layers,
-    with separate MLPs for low/mid/high features and a learned fusion before final prediction.
-
-    Inputs:
-        emb_i, emb_j:
-            - (B, E)       for single-layer embeddings
-            - (B, L, E)    for multi-layer embeddings (L layers)
-    Output:
-        - (B,) logits for edge presence/strength
-    """
-
-    def __init__(self, emb_dim: int, hidden_dim: int = 256, dropout_p: float = 0.2):
-        super().__init__()
-        self.emb_dim = emb_dim
-        self.hidden_dim = hidden_dim
-        self.dropout_p = dropout_p
-
-        # Separate layer norms for low/mid/high branches
-        self.pair_ln_low = nn.LayerNorm(4 * emb_dim)
-        self.pair_ln_mid = nn.LayerNorm(4 * emb_dim)
-        self.pair_ln_high = nn.LayerNorm(4 * emb_dim)
-
-        # Shared MLP definition helper
-        def make_pair_mlp():
-            return nn.Sequential(
-                nn.Linear(4 * emb_dim, hidden_dim),
-                nn.GELU(),
-                nn.Dropout(dropout_p),
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.GELU(),
-            )
-
-        # Three separate MLPs for low/mid/high-level pair features
-        self.pair_mlp_low = make_pair_mlp()
-        self.pair_mlp_mid = make_pair_mlp()
-        self.pair_mlp_high = make_pair_mlp()
-
-        # Fusion MLP to combine low/mid/high features
-        self.fusion_mlp = nn.Sequential(
-            nn.Linear(3 * (hidden_dim // 2), hidden_dim),
-            nn.GELU(),
-            nn.Dropout(p=dropout_p),
-        )
-
-        # Final classifier head
-        self.final_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(p=dropout_p),
-            nn.Linear(hidden_dim // 2, 1),
-        )
-
-    def _encode_pair(self, e_i: torch.Tensor, e_j: torch.Tensor, ln: nn.Module, mlp: nn.Module) -> torch.Tensor:
-        """Encode a single pair of embeddings (B, E) → (B, hidden_dim // 2)."""
-        x = torch.cat(
-            [e_i, e_j, torch.abs(e_i - e_j), e_i * e_j],
-            dim=-1,
-        )  # (B, 4E)
-        x = ln(x)
-        h = mlp(x)
-        return h
-
-    def forward(self, emb_i: torch.Tensor, emb_j: torch.Tensor) -> torch.Tensor:
-        # Single-layer case
-        if emb_i.ndim == 2:
-            h_single = self._encode_pair(emb_i, emb_j, self.pair_ln_mid, self.pair_mlp_mid)
-            logits = self.final_mlp(torch.cat([h_single, h_single, h_single], dim=-1))  # mimic 3-branch fusion
-            return logits.squeeze(-1)
-
-        # Multi-layer case
-        if emb_i.ndim != 3 or emb_j.ndim != 3:
-            raise ValueError(
-                f"MultiLayerEdgeClassifier expects emb_i, emb_j with ndim 2 or 3, got {emb_i.shape}, {emb_j.shape}"
-            )
-
-        B, L, E = emb_i.shape
-        if E != self.emb_dim:
-            raise ValueError(f"Expected embedding dim={self.emb_dim}, got {E} (shape={emb_i.shape})")
-
-        # Pick representative layers
-        idx_first = 0
-        idx_mid = L // 2
-        idx_last = L - 1
-
-        # Extract layer embeddings
-        e_i_first, e_j_first = emb_i[:, idx_first, :], emb_j[:, idx_first, :]
-        e_i_mid, e_j_mid = emb_i[:, idx_mid, :], emb_j[:, idx_mid, :]
-        e_i_last, e_j_last = emb_i[:, idx_last, :], emb_j[:, idx_last, :]
-
-        # Encode pairs at each scale
-        h_first = self._encode_pair(e_i_first, e_j_first, self.pair_ln_low, self.pair_mlp_low)
-        h_mid = self._encode_pair(e_i_mid, e_j_mid, self.pair_ln_mid, self.pair_mlp_mid)
-        h_last = self._encode_pair(e_i_last, e_j_last, self.pair_ln_high, self.pair_mlp_high)
-
-        # Fuse features (learned combination instead of mean)
-        h_cat = torch.cat([h_first, h_mid, h_last], dim=-1)  # (B, 3 * hidden_dim // 2)
-        h_fused = self.fusion_mlp(h_cat)
-
-        logits = self.final_mlp(h_fused).squeeze(-1)  # (B,)
-        return logits
-
-def pairwise_ranking_loss(
-    scores: torch.Tensor,
-    strengths: torch.Tensor,
-    margin: float = 0.1,
-    num_samples: int = 1024,
-) -> torch.Tensor:
-    """
-    Pairwise ranking loss: if strength_i > strength_j + margin,
-    encourage score_i > score_j by at least `margin`.
-
-    scores:    (B,) raw logits (or scores)
-    strengths: (B,) continuous edge strengths (e.g., from rel_mat)
-    """
-    # Ensure 1D
-    scores = scores.view(-1)
-    strengths = strengths.view(-1)
-
-    B = scores.size(0)
-    if B < 2:
-        return torch.tensor(0.0, device=scores.device)
-
-    # Randomly sample index pairs
-    idx1 = torch.randint(0, B, (num_samples,), device=scores.device)
-    idx2 = torch.randint(0, B, (num_samples,), device=scores.device)
-
-    s1 = strengths[idx1]
-    s2 = strengths[idx2]
-
-    # Keep only pairs where strength_i is significantly higher than strength_j
-    mask = s1 > (s2 + margin)
-    if mask.sum() == 0:
-        return torch.tensor(0.0, device=scores.device)
-
-    idx1 = idx1[mask]
-    idx2 = idx2[mask]
-
-    # Scores should respect the same ordering
-    score_diff = scores[idx1] - scores[idx2]  # want this > margin
-    loss = F.relu(margin - score_diff).mean()
-    return loss
 
 # ---------------------------------------------------------------------
 # Training / eval loops
@@ -676,6 +452,12 @@ def main():
         help="Optimizer type.",
     )
     parser.add_argument(
+        "--hidden_dim",
+        type=int,
+        default=256,
+        help="Hidden dimension for EdgeClassifier MLP.",
+    )
+    parser.add_argument(
         "--weight_decay",
         type=float,
         default=5e-5,
@@ -815,7 +597,49 @@ def main():
         choices=["hm3d", "gibson"],
         help="Dataset type / source of embeddings: 'gibson' or 'hm3d'."
     )
+    parser.add_argument(
+        "--emb_mode",
+        type=str,
+        default="avg_max",
+        choices=["avg", "avg_max", "chunked"],
+        help="Which embedding mode to load (used to pick all_embeds_{emb_mode}.npz).",
+    )
     args = parser.parse_args()
+
+    set_seed(args.seed)
+
+    # Device
+    device = args.device if args.device is not None else (
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    os.makedirs(args.out_dir, exist_ok=True)
+    print(f"[INFO] Using device: {device}")
+
+    # Wandb (optional)
+    try:
+        import wandb
+        _wandb_available = hasattr(wandb, "init")
+        if not _wandb_available:
+            print("[WARN] wandb imported but has no 'init' attribute. Disabling wandb logging.")
+    except ImportError:
+        wandb = None  # type: ignore
+        _wandb_available = False
+
+    use_wandb = (
+        (not args.wandb_off)
+        and _wandb_available
+        and (args.wandb_project is not None)
+    )
+    if use_wandb:
+        try:
+            wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name,
+                config=vars(args),
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to initialize wandb ({e}). Disabling wandb logging.")
+            use_wandb = False
 
     set_seed(args.seed)
 
@@ -864,6 +688,7 @@ def main():
         hard_neg_rel_thr=0.2,
         layer_mode=args.layer_mode,
         split_mode=args.data_split_mode,
+        emb_mode=args.emb_mode,
     )
 
     print(
@@ -878,6 +703,8 @@ def main():
         f"[INFO] Scenes: total={meta['num_scenes']}, "
         f"train={meta['num_train_scenes']}, val={meta['num_val_scenes']}"
     )
+    if "emb_mode" in meta:
+        print(f"[INFO] Embedding mode: {meta['emb_mode']}")
 
     # Zero-shot mode: just evaluate cosine similarity between embeddings
     if args.zero_shot:
@@ -961,7 +788,7 @@ def main():
         raise ValueError(f"Unexpected feature batch shape: {feat_i_batch.shape}")
     print(f"[INFO] Embedding dim: {emb_dim}")
 
-    classifier = EdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
+    classifier = EdgeClassifier(emb_dim=emb_dim, hidden_dim=args.hidden_dim).to(device)
     # swap to multi-layer
     #classifier = MultiLayerEdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
     
