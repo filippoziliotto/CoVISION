@@ -173,7 +173,8 @@ def extract_split_embeddings(scene_id: str,
                              split_id: str,
                              split_dir: str,
                              model: VGGT,
-                             device: str) -> None:
+                             device: str,
+                             mode: str = "avg_max") -> None:
     """
     For a given scene split, run VGGT and save embeddings for all layers.
 
@@ -201,8 +202,8 @@ def extract_split_embeddings(scene_id: str,
     # and use fixed filenames "all_embeds.npy" and "last_embeds.npy" per split.
     split_out_dir = os.path.join(PRED_ROOT, scene_id, f"split_{split_id}", "embs")
     os.makedirs(split_out_dir, exist_ok=True)
-    out_all_path = os.path.join(split_out_dir, "all_embeds_avgmax.npz")
-    out_last_path = os.path.join(split_out_dir, "last_embeds_avgmax.npz")
+    out_all_path = os.path.join(split_out_dir, f"all_embeds_{mode}.npz")
+    out_last_path = os.path.join(split_out_dir, f"last_embeds_{mode}.npz")
 
     # If already saved, skip
     if os.path.isfile(out_all_path):
@@ -223,7 +224,7 @@ def extract_split_embeddings(scene_id: str,
         )
 
     # Compute embeddings for all layers
-    layer_embs = [make_image_embeddings(feats_layer) for feats_layer in feat_layers]
+    layer_embs = [make_image_embeddings(feats_layer, mode=mode) for feats_layer in feat_layers]
 
     # Check all embeddings have the same shape
     emb_shapes = [e.shape for e in layer_embs]
@@ -245,7 +246,8 @@ def extract_split_embeddings(scene_id: str,
 # ---------------------------------------------------------------------
 # Per-scene: loop splits
 # ---------------------------------------------------------------------
-def process_scene(scene_dir: str, model: VGGT, device: str = "cpu") -> None:
+def process_scene(scene_dir: str, model: VGGT, mode: str = "avg_max",
+                  device: str = "cpu") -> None:
     """
     scene_dir:
       - HM3D:  .../More_vis/{scene_id}.basis
@@ -274,7 +276,7 @@ def process_scene(scene_dir: str, model: VGGT, device: str = "cpu") -> None:
         if not os.path.isdir(saved_obs):
             continue
 
-        extract_split_embeddings(scene_id, split_name, split_path, model, device)
+        extract_split_embeddings(scene_id, split_name, split_path, model, device, mode=mode)
 
 
 # ---------------------------------------------------------------------
@@ -288,6 +290,12 @@ def main():
         "--use_scene",
         choices=["hm3d", "gibson"],
         default="hm3d",
+        help="Override automatic dataset detection and use the specified scene dataset.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["avg", "avg_max", "chunked"],
+        default="avg",
         help="Override automatic dataset detection and use the specified scene dataset.",
     )
     args = parser.parse_args()
@@ -388,7 +396,7 @@ def main():
 
     # Process each scene
     for scene_dir in scene_dirs:
-        process_scene(scene_dir, model, device=device)
+        process_scene(scene_dir, model, device=device, mode=args.mode)
 
     print("[INFO] Done extracting and saving embeddings.")
 
