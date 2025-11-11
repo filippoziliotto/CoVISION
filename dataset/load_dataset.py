@@ -11,11 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.utils import shuffle as sk_shuffle
 import argparse
 
-USE_HM3D = False  # Set to True to use HM3D paths
-if USE_HM3D:
-    PRED_ROOT = "data/predictions_feat/hvgg"
-else:
-    PRED_ROOT = "data/predictions_feat/gvgg"
+PRED_ROOT = "data/predictions_feat/gvgg"
 GIBSON_BASE_PATTERN = "data/vast/cc7287/gvgg-{i}"  # i in [1..5]
 HM3D_BASE_PATTERN = "data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg/part{i}"  # i in [a,b,c,d,e,f,g,h,i,l]
 HM3D_PARTS = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "l"]
@@ -24,10 +20,10 @@ HM3D_PARTS = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "l"]
 # -------------------------------------------------------
 # Utilities
 # -------------------------------------------------------
-def _discover_scene_splits() -> List[Dict]:
+def _discover_scene_splits(dataset_type: str) -> List[Dict]:
     """
     Discover all (scene_version, split_id, saved_obs) across Gibson or HM3D,
-    depending on USE_HM3D.
+    depending on dataset_type.
 
     Returns list of dicts:
       {
@@ -38,7 +34,7 @@ def _discover_scene_splits() -> List[Dict]:
     """
     splits = []
 
-    if USE_HM3D:
+    if dataset_type == "hm3d":
         # HM3D: data/.../HM3D/dust3r_vpr_mask/data/hvgg/part{letter}/temp/More_vis/{scene_id}.basis/{split}/saved_obs
         for part in HM3D_PARTS:
             base_root = HM3D_BASE_PATTERN.format(i=part)
@@ -384,6 +380,7 @@ class EdgePairDataset(Dataset):
 # Main builder: from gvgg-1..5 + predictions_feat
 # -------------------------------------------------------
 def build_dataloaders(
+    dataset_type: str = "gibson",
     batch_size: int = 64,
     num_workers: int = 4,
     train_ratio: float = 0.8,
@@ -414,8 +411,15 @@ def build_dataloaders(
     Returns:
         train_loader, val_loader, train_ds, val_ds, meta
     """
-    # 1) Discover all splits
-    split_meta = _discover_scene_splits()
+    # 1) Set PRED_ROOT based on dataset_type
+    global PRED_ROOT
+    if dataset_type == "hm3d":
+        PRED_ROOT = "data/predictions_feat/hvgg"
+    else:
+        PRED_ROOT = "data/predictions_feat/gvgg"
+
+    # 2) Discover all splits
+    split_meta = _discover_scene_splits(dataset_type)
     if not split_meta:
         raise RuntimeError("No scene splits found under dataset roots")
 
@@ -590,16 +594,26 @@ if __name__ == "__main__":
         choices=["scene_disjoint", "version_disjoint", "graph"],
         help="Split mode: 'scene_disjoint', 'version_disjoint', or 'graph'."
     )
+    parser.add_argument(
+        "--layer_mode", type=str, default="all", help="Layer mode for embeddings.")
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="gibson",
+        choices=["gibson", "hm3d"],
+        help="Dataset type: 'gibson' or 'hm3d'."
+    )
     args = parser.parse_args()
 
     train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders(
+        dataset_type=args.dataset_type,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
         max_neg_ratio=args.max_neg_ratio,
         hard_neg_ratio=args.hard_neg_ratio,
         hard_neg_rel_thr=args.hard_neg_rel_thr,
-        layer_mode="1st_last",
+        layer_mode=args.layer_mode,
         split_mode=args.split_mode,
     )
 

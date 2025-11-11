@@ -805,6 +805,16 @@ def main():
         default=0.3,
         help="Weight for the soft IoU loss term."
     )
+    parser.add_argument(
+        "--train_ratio", type=float, default=0.8, help="Train/val split ratio."
+    )
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="gibson",
+        choices=["hm3d", "gibson"],
+        help="Dataset type / source of embeddings: 'gibson' or 'hm3d'."
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -844,10 +854,11 @@ def main():
 
     # Build dataloaders
     train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders(
+        dataset_type=args.dataset_type,
         batch_size=args.batch_size,
         seed=args.seed,
         num_workers=4,
-        train_ratio=0.8,
+        train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
         max_neg_ratio=args.max_neg_ratio,
         hard_neg_ratio=0.5,
         hard_neg_rel_thr=0.2,
