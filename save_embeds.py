@@ -334,7 +334,7 @@ def main():
     scene_dirs = []
     if USE_HM3D:
         # HM3D: hvgg/part{letter}/temp/More_vis/{scene_id}.basis/{split}/saved_obs
-        hm3d_parts = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "l"]
+        hm3d_parts = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
         for part in hm3d_parts:
             part_root = os.path.join(HVGG_ROOT, f"part{part}", "temp", "More_vis")
             if not os.path.isdir(part_root):

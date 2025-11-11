@@ -8,6 +8,8 @@ wandb/
 TODO.txt
 *.pth
 **/plots/
+slurm/
+logs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
