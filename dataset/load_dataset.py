@@ -343,26 +343,30 @@ class EdgePairDataset(Dataset):
             self.pairs.extend(pos_pairs)
             total_pos += num_pos
 
-            # If no negatives or disabled, skip negative sampling
-            if max_neg_ratio <= 0 or num_neg_total == 0:
+            # Negative subsampling
+            if num_neg_total == 0:
                 continue
 
-            # Total negatives we want to keep from this graph
-            k_total_neg = int(num_pos * max_neg_ratio)
-            k_total_neg = min(k_total_neg, num_neg_total)
-            if k_total_neg <= 0:
-                continue
+            # If max_neg_ratio <= 0, keep all negatives (no subsampling)
+            if max_neg_ratio <= 0:
+                sampled_neg = neg_pairs_hard + neg_pairs_easy
+            else:
+                # Total negatives we want to keep from this graph
+                k_total_neg = int(num_pos * max_neg_ratio)
+                k_total_neg = min(k_total_neg, num_neg_total)
+                if k_total_neg <= 0:
+                    continue
 
-            # How many of those should be hard
-            k_hard = min(len(neg_pairs_hard), int(k_total_neg * hard_neg_ratio))
-            k_easy = k_total_neg - k_hard
+                # How many of those should be hard
+                k_hard = min(len(neg_pairs_hard), int(k_total_neg * hard_neg_ratio))
+                k_easy = k_total_neg - k_hard
 
-            sampled_neg = []
-            if k_hard > 0:
-                sampled_neg.extend(random.sample(neg_pairs_hard, k_hard))
-            if k_easy > 0 and len(neg_pairs_easy) > 0:
-                k_easy = min(k_easy, len(neg_pairs_easy))
-                sampled_neg.extend(random.sample(neg_pairs_easy, k_easy))
+                sampled_neg = []
+                if k_hard > 0:
+                    sampled_neg.extend(random.sample(neg_pairs_hard, k_hard))
+                if k_easy > 0 and len(neg_pairs_easy) > 0:
+                    k_easy = min(k_easy, len(neg_pairs_easy))
+                    sampled_neg.extend(random.sample(neg_pairs_easy, k_easy))
 
             kept_neg = len(sampled_neg)
             print(

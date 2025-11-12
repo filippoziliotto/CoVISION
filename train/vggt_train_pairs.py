@@ -700,8 +700,8 @@ def main():
         raise ValueError(f"Unexpected feature batch shape: {feat_i_batch.shape}")
     print(f"[INFO] Embedding dim: {emb_dim}")
 
-    # classifier = EdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
-    classifier = MultiLayerEdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
+    classifier = EdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
+    # classifier = MultiLayerEdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
 
     n_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
     print(f"[INFO] Trainable parameters: {n_params}")
