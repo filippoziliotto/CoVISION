@@ -16,7 +16,7 @@ PRED_ROOT = "data/predictions_feat"
 # -------------------------------------------------------
 # Discover pair npz files under data/predictions_feat
 # -------------------------------------------------------
-def _discover_pair_graphs() -> List[Dict]:
+def _discover_pair_graphs(emb_mode:str = "avg") -> List[Dict]:
     """
     Scan data/predictions_feat for all (scene_version, split_id) that
     have pair_embs/pairs.npz.
@@ -42,7 +42,7 @@ def _discover_pair_graphs() -> List[Dict]:
 
             split_id = split_name.split("_", 1)[1]
             pair_dir = os.path.join(split_dir, "pair_embs")
-            pair_path = os.path.join(pair_dir, "pairs.npz")
+            pair_path = os.path.join(pair_dir, f"pairs_{emb_mode}.npz")
 
             if not os.path.isfile(pair_path):
                 continue
@@ -56,7 +56,7 @@ def _discover_pair_graphs() -> List[Dict]:
             )
 
     if not graphs:
-        raise RuntimeError("No pair_embs/pairs.npz found under data/predictions_feat")
+        raise RuntimeError(f"No pair_embs/pairs_{emb_mode}.npz found under data/predictions_feat")
 
     return graphs
 
@@ -262,6 +262,7 @@ def build_dataloaders_pairs(
     hard_neg_rel_thr: float = 0.3,
     layer_mode: str = "1st_last",
     split_mode: str = "scene_disjoint",
+    emb_mode: str = "avg",
 ) -> Tuple[DataLoader, DataLoader, Dataset, Dataset, Dict]:
     """
     Build dataloaders directly from pair-level embeddings:
@@ -285,7 +286,7 @@ def build_dataloaders_pairs(
     np.random.seed(seed)
 
     # 1) Discover all pair graphs
-    meta_graphs = _discover_pair_graphs()
+    meta_graphs = _discover_pair_graphs(emb_mode=emb_mode)
 
     # 2) Load each pairs.npz into memory
     graphs = []
@@ -400,6 +401,7 @@ def build_dataloaders_pairs(
         emb_dim=emb_dim,
         split_mode=split_mode,
         dataset_type=dataset_type,
+        emb_mode=emb_mode,
     )
 
     print(
@@ -445,6 +447,13 @@ if __name__ == "__main__":
         choices=["hm3d", "gibson"],
         help="Dataset type / source of pair embeddings: 'gibson' or 'hm3d'.",
     )
+    parser.add_argument(
+        "--embd_mode",
+        type=str,
+        default="avg",
+        choices=["avg", "avg_max", "chunked"],
+        help="Dataset type / source of pair embeddings: 'gibson' or 'hm3d'.",
+    )
     args = parser.parse_args()
 
     train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders_pairs(
@@ -457,6 +466,7 @@ if __name__ == "__main__":
         hard_neg_rel_thr=args.hard_neg_rel_thr,
         layer_mode=args.layer_mode,
         split_mode=args.split_mode,
+        emb_mode=args.emb_mode
     )
 
     print(f"[CHECK] Train dataset size: {len(train_ds)}")
