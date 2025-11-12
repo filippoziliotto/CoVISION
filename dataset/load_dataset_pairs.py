@@ -179,7 +179,17 @@ class EdgePairDatasetPairs(Dataset):
                     else:
                         neg_pairs_easy.append(triple)
 
+            # Compute and print per-graph statistics
             num_pos = len(pos_pairs)
+            num_neg_hard = len(neg_pairs_hard)
+            num_neg_easy = len(neg_pairs_easy)
+            num_neg_total = num_neg_hard + num_neg_easy
+            print(
+                f"[DEBUG] Graph {scene_version} split {split_id}: "
+                f"P={P}, pos={num_pos}, neg_hard={num_neg_hard}, "
+                f"neg_easy={num_neg_easy}, neg_total={num_neg_total}"
+            )
+
             if num_pos == 0:
                 print(
                     f"[WARN] Graph {scene_version} split {split_id} "
@@ -192,7 +202,6 @@ class EdgePairDatasetPairs(Dataset):
             total_pos += num_pos
 
             # Negative subsampling
-            num_neg_total = len(neg_pairs_hard) + len(neg_pairs_easy)
             if max_neg_ratio <= 0 or num_neg_total == 0:
                 continue
 
@@ -211,8 +220,14 @@ class EdgePairDatasetPairs(Dataset):
                 k_easy = min(k_easy, len(neg_pairs_easy))
                 sampled_neg.extend(random.sample(neg_pairs_easy, k_easy))
 
+            kept_neg = len(sampled_neg)
+            print(
+                f"[DEBUG] Kept negatives for {scene_version} split {split_id}: "
+                f"kept={kept_neg} / total={num_neg_total}"
+            )
+
             self.pairs.extend(sampled_neg)
-            total_neg += len(sampled_neg)
+            total_neg += kept_neg
 
         print(
             f"[INFO] EdgePairDatasetPairs: total pairs={len(self.pairs)} "
@@ -237,6 +252,7 @@ class EdgePairDatasetPairs(Dataset):
 # Main builder for pair embeddings
 # -------------------------------------------------------
 def build_dataloaders_pairs(
+    dataset_type: str = "gibson",
     batch_size: int = 64,
     num_workers: int = 4,
     train_ratio: float = 0.8,
@@ -253,7 +269,18 @@ def build_dataloaders_pairs(
       data/predictions_feat/{scene_version}/split_{split_id}/pair_embs/pairs.npz
 
     Args largely mirror load_dataset.build_dataloaders.
+
+    Args:
+        dataset_type: "gibson" (default) or "hm3d", used to pick gvgg/hvgg roots.
+        split_mode: "scene_disjoint", "version_disjoint", or "graph" (same semantics as load_dataset).
+        ...
     """
+    global PRED_ROOT
+    if dataset_type == "hm3d":
+        PRED_ROOT = "data/predictions_feat/hvgg"
+    else:
+        PRED_ROOT = "data/predictions_feat/gvgg"
+
     random.seed(seed)
     np.random.seed(seed)
 
@@ -372,6 +399,7 @@ def build_dataloaders_pairs(
         num_val_scenes=len(val_scenes),
         emb_dim=emb_dim,
         split_mode=split_mode,
+        dataset_type=dataset_type,
     )
 
     print(
@@ -410,9 +438,17 @@ if __name__ == "__main__":
         default="1st_last",
         choices=["all", "1st_last", "2nd_last", "3rd_last", "4th_last"],
     )
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="gibson",
+        choices=["hm3d", "gibson"],
+        help="Dataset type / source of pair embeddings: 'gibson' or 'hm3d'.",
+    )
     args = parser.parse_args()
 
     train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders_pairs(
+        dataset_type=args.dataset_type,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,

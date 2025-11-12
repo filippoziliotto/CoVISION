@@ -759,6 +759,13 @@ def main():
         type=float,
         default=0.3,
     )
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="gibson",
+        choices=["hm3d", "gibson"],
+        help="Dataset type / source of pair embeddings: 'gibson' or 'hm3d'.",
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -798,10 +805,11 @@ def main():
 
     # Build dataloaders (pair-level)
     train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders_pairs(
+        dataset_type=args.dataset_type,
         batch_size=args.batch_size,
         seed=args.seed,
         num_workers=4,
-        train_ratio=0.8,
+        train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
         max_neg_ratio=args.max_neg_ratio,
         hard_neg_ratio=0.5,
         hard_neg_rel_thr=0.2,

@@ -322,10 +322,20 @@ class EdgePairDataset(Dataset):
                         else:
                             neg_pairs_easy.append(triple)
 
+            # Compute and log per-graph statistics
             num_pos = len(pos_pairs)
+            num_neg_hard = len(neg_pairs_hard)
+            num_neg_easy = len(neg_pairs_easy)
+            num_neg_total = num_neg_hard + num_neg_easy
+            scene_version = g.get("scene_version", "?")
+            split_id = g.get("split_id", "?")
+            print(
+                f"[DEBUG] Graph {scene_version} split {split_id}: N={N}, pos={num_pos}, neg_hard={num_neg_hard}, neg_easy={num_neg_easy}, neg_total={num_neg_total}"
+            )
+
             if num_pos == 0:
                 print(
-                    f"[WARN] Graph {g.get('scene_version', '?')} split {g.get('split_id', '?')} has no positive edges, skipping."
+                    f"[WARN] Graph {scene_version} split {split_id} has no positive edges, skipping."
                 )
                 continue
 
@@ -334,7 +344,6 @@ class EdgePairDataset(Dataset):
             total_pos += num_pos
 
             # If no negatives or disabled, skip negative sampling
-            num_neg_total = len(neg_pairs_hard) + len(neg_pairs_easy)
             if max_neg_ratio <= 0 or num_neg_total == 0:
                 continue
 
@@ -355,8 +364,13 @@ class EdgePairDataset(Dataset):
                 k_easy = min(k_easy, len(neg_pairs_easy))
                 sampled_neg.extend(random.sample(neg_pairs_easy, k_easy))
 
+            kept_neg = len(sampled_neg)
+            print(
+                f"[DEBUG] Kept negatives for {scene_version} split {split_id}: kept={kept_neg} / total={num_neg_total}"
+            )
+
             self.pairs.extend(sampled_neg)
-            total_neg += len(sampled_neg)
+            total_neg += kept_neg
 
         print(
             f"[INFO] EdgePairDataset: total pairs={len(self.pairs)} "
@@ -601,7 +615,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_type",
         type=str,
-        default="hm3d",
+        default="gibson",
         choices=["gibson", "hm3d"],
         help="Dataset type: 'gibson' or 'hm3d'."
     )

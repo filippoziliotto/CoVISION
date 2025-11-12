@@ -23,7 +23,7 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
-PRED_ROOT = "data/predictions_feat"
+PRED_ROOT: str | None = None
 
 
 def discover_scene_splits(base_root: str) -> List[dict]:
@@ -76,7 +76,7 @@ def discover_scene_splits(base_root: str) -> List[dict]:
 
     return results
 
-def extract_all_layer_embeds(predictions: dict) -> np.ndarray:
+def extract_all_layer_embeds(predictions: dict, mode: str = "avg_max") -> np.ndarray:
     """
     Extract per-layer, per-view embeddings from VGGT predictions using the same
     per-image embedding logic as in save_embeds.make_image_embeddings.
@@ -98,7 +98,7 @@ def extract_all_layer_embeds(predictions: dict) -> np.ndarray:
     layer_embs = []
     for feats_layer in feat_layers:
         # Reuse the same aggregation logic as in save_embeds.py
-        emb = make_image_embeddings(feats_layer, mode="avg_max")  # (S, E) where S = #views
+        emb = make_image_embeddings(feats_layer, mode=mode)  # (S, E) where S = #views
         layer_embs.append(emb.cpu().numpy().astype(np.float32))
 
     # Stack over layers → (L, S, E)
@@ -112,12 +112,16 @@ def process_scene_split(
     split_id: str,
     saved_obs: str,
     gt_csv: str,
+    mode: str = "avg_max",
 ) -> None:
     """
     For a single (scene_version, split_id), read GroundTruth.csv,
     run VGGT on each image pair, and save pair embeddings to:
 
         data/predictions_feat/{scene_version}/split_{split_id}/pair_embs/pairs.npz
+
+    Args:
+        mode: Controls how per-image embeddings are aggregated, consistent with save_embeds.make_image_embeddings.
     """
     # List all PNGs to define a consistent index space
     img_files = sorted(f for f in os.listdir(saved_obs) if f.endswith(".png"))
@@ -191,7 +195,7 @@ def process_scene_split(
         with torch.no_grad():
             preds = model(images_pre, extract_features=True)
 
-        emb_layers = extract_all_layer_embeds(preds)  # (L, S, E)
+        emb_layers = extract_all_layer_embeds(preds, mode=mode)  # (L, S, E)
         L, S, E = emb_layers.shape
         if S < 2:
             print(f"[WARN] Expected at least 2 views in embeddings for pair, got {emb_layers.shape}")
@@ -256,6 +260,7 @@ def process_scene_split(
 
 
 def main():
+    global PRED_ROOT
     parser = argparse.ArgumentParser(
         description=(
             "Save pair-wise VGGT all-layer embeddings for each scene_version/split "
@@ -280,6 +285,12 @@ def main():
         default=-1,
         help="Optional cap on number of scene_versions to process (for debugging).",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["avg", "avg_max", "chunked"],
+        default="avg",
+        help="How to aggregate VGGT features into per-image embeddings (avg, avg_max, chunked).",
+    )
     args = parser.parse_args()
 
     # Device
@@ -295,6 +306,14 @@ def main():
 
     device = torch.device(device_str)
     print(f"[INFO] Using device: {device}")
+
+    # Set PRED_ROOT based on base_root
+    if "hvgg" in args.base_root:
+        PRED_ROOT = "data/predictions_feat/hvgg"
+    else:
+        PRED_ROOT = "data/predictions_feat/gvgg"
+    os.makedirs(PRED_ROOT, exist_ok=True)
+    print(f"[INFO] Saving pair embeddings under: {PRED_ROOT}")
 
     # Init VGGT
     print("[INFO] Initializing VGGT...")
@@ -323,6 +342,7 @@ def main():
             split_id=meta["split_id"],
             saved_obs=meta["saved_obs"],
             gt_csv=meta["gt_csv"],
+            mode=args.mode,
         )
 
 
