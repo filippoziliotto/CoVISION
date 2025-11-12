@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 from dataset.load_dataset_pairs import build_dataloaders_pairs, build_dataloaders_pairs_cross
 from utils.utils import set_seed, pairwise_ranking_loss
-from models.PairView import MultiLayerEdgeClassifier, EdgeClassifier
+from models.PairView import EdgeClassifier, GatedLayerFusion
 
 warnings.filterwarnings("ignore")
 
@@ -741,7 +741,7 @@ def main():
     print(f"[INFO] Embedding dim: {emb_dim}")
 
     classifier = EdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
-    # classifier = MultiLayerEdgeClassifier(emb_dim=emb_dim, hidden_dim=256).to(device)
+    #classifier = GatedLayerFusion(emb_dim=emb_dim,hidden_dim=256,vec_gate=False).to(device)
 
     n_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
     print(f"[INFO] Trainable parameters: {n_params}")
