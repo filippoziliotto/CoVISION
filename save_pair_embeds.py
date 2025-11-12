@@ -28,53 +28,89 @@ PRED_ROOT: str | None = None
 
 def discover_scene_splits(base_root: str) -> List[dict]:
     """
-    Discover all (scene_version, split_id, saved_obs) under a single gvgg-{i} root.
+    Discover all (scene_version, split_id, saved_obs) under a single gvgg-{i} root or HM3D hvgg root.
 
-    Expected layout:
-        base_root/temp/More_vis/{scene_version}/{split_id}/saved_obs/...
+    For HM3D (hvgg), search under all parts and drop the .basis suffix from scene_version.
+    For Gibson (gvgg-{i}), search under base_root/temp/More_vis and base_root/More_vis.
     """
     results: List[dict] = []
 
-    # Try both layouts: base_root/temp/More_vis and base_root/More_vis
-    candidates = [
-        os.path.join(base_root, "temp", "More_vis"),
-        os.path.join(base_root, "More_vis"),
-    ]
-    candidates = [c for c in candidates if os.path.isdir(c)]
-    if not candidates:
-        print(f"[WARN] No More_vis directories found under {base_root}")
-        return results
-
-    for more_vis_root in candidates:
-        for scene_name in sorted(os.listdir(more_vis_root)):
-            scene_dir = os.path.join(more_vis_root, scene_name)
-            if not os.path.isdir(scene_dir):
+    if "hvgg" in base_root:
+        # HM3D layout: base_root/part{a..l}/temp/More_vis/{scene_id}.basis/{split}/saved_obs
+        hm3d_parts = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]
+        for part in hm3d_parts:
+            part_root = os.path.join(base_root, f"part{part}", "temp", "More_vis")
+            if not os.path.isdir(part_root):
                 continue
-
-            for split_name in sorted(os.listdir(scene_dir)):
-                split_dir = os.path.join(scene_dir, split_name)
-                if not os.path.isdir(split_dir):
+            for scene_name in sorted(os.listdir(part_root)):
+                scene_dir = os.path.join(part_root, scene_name)
+                if not os.path.isdir(scene_dir):
                     continue
-
-                saved_obs = os.path.join(split_dir, "saved_obs")
-                if not os.path.isdir(saved_obs):
-                    continue
-
-                gt_csv = os.path.join(saved_obs, "GroundTruth.csv")
-                if not os.path.isfile(gt_csv):
-                    print(f"[WARN] Missing GroundTruth.csv in {saved_obs}, skipping.")
-                    continue
-
-                results.append(
-                    dict(
-                        scene_version=scene_name,
-                        split_id=split_name,
-                        saved_obs=saved_obs,
-                        gt_csv=gt_csv,
+                # Remove .basis suffix for saving
+                scene_id = scene_name.split(".basis")[0]
+                for split_name in sorted(os.listdir(scene_dir)):
+                    if not split_name.isdigit():
+                        continue
+                    split_dir = os.path.join(scene_dir, split_name)
+                    if not os.path.isdir(split_dir):
+                        continue
+                    saved_obs = os.path.join(split_dir, "saved_obs")
+                    if not os.path.isdir(saved_obs):
+                        continue
+                    gt_csv = os.path.join(saved_obs, "GroundTruth.csv")
+                    if not os.path.isfile(gt_csv):
+                        continue
+                    results.append(
+                        dict(
+                            scene_version=scene_id,
+                            split_id=split_name,
+                            saved_obs=saved_obs,
+                            gt_csv=gt_csv,
+                        )
                     )
-                )
+        return results
+    else:
+        # Gibson gvgg-{i} layout: search under base_root/temp/More_vis and base_root/More_vis
+        # This is the Gibson layout (gvgg-{i})
+        candidates = [
+            os.path.join(base_root, "temp", "More_vis"),
+            os.path.join(base_root, "More_vis"),
+        ]
+        candidates = [c for c in candidates if os.path.isdir(c)]
+        if not candidates:
+            print(f"[WARN] No More_vis directories found under {base_root}")
+            return results
 
-    return results
+        for more_vis_root in candidates:
+            for scene_name in sorted(os.listdir(more_vis_root)):
+                scene_dir = os.path.join(more_vis_root, scene_name)
+                if not os.path.isdir(scene_dir):
+                    continue
+
+                for split_name in sorted(os.listdir(scene_dir)):
+                    split_dir = os.path.join(scene_dir, split_name)
+                    if not os.path.isdir(split_dir):
+                        continue
+
+                    saved_obs = os.path.join(split_dir, "saved_obs")
+                    if not os.path.isdir(saved_obs):
+                        continue
+
+                    gt_csv = os.path.join(saved_obs, "GroundTruth.csv")
+                    if not os.path.isfile(gt_csv):
+                        print(f"[WARN] Missing GroundTruth.csv in {saved_obs}, skipping.")
+                        continue
+
+                    results.append(
+                        dict(
+                            scene_version=scene_name,
+                            split_id=split_name,
+                            saved_obs=saved_obs,
+                            gt_csv=gt_csv,
+                        )
+                    )
+
+        return results
 
 def extract_all_layer_embeds(predictions: dict, mode: str = "avg_max") -> np.ndarray:
     """
@@ -271,7 +307,7 @@ def main():
         "--base_root",
         type=str,
         default="data/vast/cc7287/gvgg-1",
-        help="Base root for a single version (e.g. data/vast/cc7287/gvgg-1)",
+        help="Base root for Gibson (e.g. data/vast/cc7287/gvgg-1) or for HM3D: the shared hvgg root (e.g. data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg)",
     )
     parser.add_argument(
         "--device",
