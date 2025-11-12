@@ -479,12 +479,12 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
-        max_neg_ratio=args.max_neg_ratio,
-        hard_neg_ratio=args.hard_neg_ratio if not args.keep_all_data else -1.0,
+        max_neg_ratio=args.max_neg_ratio if not args.keep_all_data else -1.0,
+        hard_neg_ratio=args.hard_neg_ratio,
         hard_neg_rel_thr=args.hard_neg_rel_thr,
         layer_mode=args.layer_mode,
         split_mode=args.split_mode,
-        emb_mode=args.emb_mode
+        emb_mode=args.emb_mode,
     )
 
     print(f"[CHECK] Train dataset size: {len(train_ds)}")

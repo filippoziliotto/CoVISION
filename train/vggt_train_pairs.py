@@ -561,6 +561,17 @@ def main():
         action="store_true",
         help="If set, do not subsample negatives (keep all data). Overrides max_neg_ratio.",
     )
+    parser.add_argument(
+        "--max_neg_ratio",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--hard_neg_ratio",
+        type=float,
+        default=0.5,
+        help="Fraction of sampled negatives that are hard.",
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -605,8 +616,8 @@ def main():
         seed=args.seed,
         num_workers=4,
         train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
-        max_neg_ratio=args.max_neg_ratio,
-        hard_neg_ratio=args.hard_neg_ratio if not args.keep_all_data else -1.0,
+        max_neg_ratio=args.max_neg_ratio if not args.keep_all_data else -1.0,
+        hard_neg_ratio=args.hard_neg_ratio,
         hard_neg_rel_thr=0.3,
         layer_mode=args.layer_mode,
         split_mode=args.data_split_mode,
