@@ -475,6 +475,8 @@ def main():
         default=1.0,
         help="Max negative:positive ratio for edge pairs.",
     )
+    parser.add_argument("--hard_neg_ratio", type=float, default=0.5)
+
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", type=str, default="mps")
     parser.add_argument("--out_dir", type=str, default="train/classifier")
@@ -604,6 +606,11 @@ def main():
         choices=["avg", "avg_max", "chunked"],
         help="Which embedding mode to load (used to pick all_embeds_{emb_mode}.npz).",
     )
+    parser.add_argument(
+        "--keep_all_data",
+        action="store_true",
+        help="If set, do not subsample negatives (keep all data). Overrides max_neg_ratio.",
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -684,8 +691,8 @@ def main():
         num_workers=4,
         train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
         max_neg_ratio=args.max_neg_ratio,
-        hard_neg_ratio=0.5,
-        hard_neg_rel_thr=0.2,
+        hard_neg_ratio=args.hard_neg_ratio if not args.keep_all_data else -1.0,
+        hard_neg_rel_thr=0.3,
         layer_mode=args.layer_mode,
         split_mode=args.data_split_mode,
         emb_mode=args.emb_mode,

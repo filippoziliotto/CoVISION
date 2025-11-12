@@ -630,6 +630,12 @@ if __name__ == "__main__":
         choices=["avg", "avg_max", "chunked"],
         help="Which embedding mode to load (matches save_embeds.py)."
     )
+    parser.add_argument(
+        "--keep_all_data",
+        action="store_true",
+        help="If set, do not subsample negatives (keep all data). Overrides max_neg_ratio.",
+    )
+    
     args = parser.parse_args()
 
     train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders(
@@ -638,7 +644,7 @@ if __name__ == "__main__":
         num_workers=args.num_workers,
         seed=args.seed,
         max_neg_ratio=args.max_neg_ratio,
-        hard_neg_ratio=args.hard_neg_ratio,
+        hard_neg_ratio=args.hard_neg_ratio if not args.keep_all_data else -1.0,
         hard_neg_rel_thr=args.hard_neg_rel_thr,
         layer_mode=args.layer_mode,
         split_mode=args.split_mode,

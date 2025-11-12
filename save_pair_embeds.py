@@ -23,7 +23,7 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
-PRED_ROOT: str | None = None
+PRED_ROOT = None
 
 
 def discover_scene_splits(base_root: str) -> List[dict]:
@@ -276,7 +276,7 @@ def process_scene_split(
         "pair_embs",
     )
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "pairs.npz")
+    out_path = os.path.join(out_dir, f"pairs_{mode}.npz")
 
     np.savez_compressed(
         out_path,
