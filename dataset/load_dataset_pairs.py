@@ -16,13 +16,14 @@ PRED_ROOT = "data/predictions_feat"
 # -------------------------------------------------------
 # Discover pair npz files under data/predictions_feat
 # -------------------------------------------------------
-def _discover_pair_graphs(emb_mode:str = "avg") -> List[Dict]:
+def _discover_pair_graphs(emb_mode: str = "avg") -> List[Dict]:
     """
     Scan data/predictions_feat for all (scene_version, split_id) that
-    have pair_embs/pairs.npz.
+    have pair_embs/pairs_{emb_mode}.npz or fallback to pair_embs/pairs.npz.
 
     Expected layout:
-        data/predictions_feat/{scene_version}/split_{split_id}/pair_embs/pairs.npz
+        data/predictions_feat/{scene_version}/split_{split_id}/pair_embs/pairs_{emb_mode}.npz
+        (fallback: pairs.npz)
     """
     graphs = []
     if not os.path.isdir(PRED_ROOT):
@@ -42,21 +43,29 @@ def _discover_pair_graphs(emb_mode:str = "avg") -> List[Dict]:
 
             split_id = split_name.split("_", 1)[1]
             pair_dir = os.path.join(split_dir, "pair_embs")
-            pair_path = os.path.join(pair_dir, f"pairs_{emb_mode}.npz")
+            pair_path_mode = os.path.join(pair_dir, f"pairs_{emb_mode}.npz")
+            pair_path_fallback = os.path.join(pair_dir, "pairs.npz")
 
-            if not os.path.isfile(pair_path):
+            # Prefer pairs_{emb_mode}.npz, else fallback to pairs.npz, else skip
+            if os.path.isfile(pair_path_mode):
+                actual_pair_path = pair_path_mode
+            elif os.path.isfile(pair_path_fallback):
+                actual_pair_path = pair_path_fallback
+            else:
                 continue
 
             graphs.append(
                 dict(
                     scene_version=scene_version,
                     split_id=split_id,
-                    pair_path=pair_path,
+                    pair_path=actual_pair_path,
                 )
             )
 
     if not graphs:
-        raise RuntimeError(f"No pair_embs/pairs_{emb_mode}.npz found under data/predictions_feat")
+        raise RuntimeError(
+            f"No pair_embs/pairs_{emb_mode}.npz or pairs.npz found under data/predictions_feat"
+        )
 
     return graphs
 
