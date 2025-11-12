@@ -16,21 +16,21 @@ PRED_ROOT = "data/predictions_feat"
 # -------------------------------------------------------
 # Discover pair npz files under data/predictions_feat
 # -------------------------------------------------------
-def _discover_pair_graphs(emb_mode: str = "avg") -> List[Dict]:
+def _discover_pair_graphs(emb_mode: str = "avg", pred_root: str = PRED_ROOT) -> List[Dict]:
     """
-    Scan data/predictions_feat for all (scene_version, split_id) that
+    Scan pred_root for all (scene_version, split_id) that
     have pair_embs/pairs_{emb_mode}.npz or fallback to pair_embs/pairs.npz.
 
     Expected layout:
-        data/predictions_feat/{scene_version}/split_{split_id}/pair_embs/pairs_{emb_mode}.npz
+        {pred_root}/{scene_version}/split_{split_id}/pair_embs/pairs_{emb_mode}.npz
         (fallback: pairs.npz)
     """
     graphs = []
-    if not os.path.isdir(PRED_ROOT):
-        raise RuntimeError(f"PRED_ROOT '{PRED_ROOT}' does not exist.")
+    if not os.path.isdir(pred_root):
+        raise RuntimeError(f"PRED_ROOT '{pred_root}' does not exist.")
 
-    for scene_version in sorted(os.listdir(PRED_ROOT)):
-        scene_dir = os.path.join(PRED_ROOT, scene_version)
+    for scene_version in sorted(os.listdir(pred_root)):
+        scene_dir = os.path.join(pred_root, scene_version)
         if not os.path.isdir(scene_dir):
             continue
 
@@ -64,10 +64,102 @@ def _discover_pair_graphs(emb_mode: str = "avg") -> List[Dict]:
 
     if not graphs:
         raise RuntimeError(
-            f"No pair_embs/pairs_{emb_mode}.npz or pairs.npz found under data/predictions_feat"
+            f"No pair_embs/pairs_{emb_mode}.npz or pairs.npz found under {pred_root}"
         )
 
     return graphs
+
+
+# -------------------------------------------------------
+# Utility helpers for pair-level graphs
+# -------------------------------------------------------
+def _load_graphs_from_meta(meta_graphs: List[Dict]) -> List[Dict]:
+    """
+    Given meta_graphs from _discover_pair_graphs, load the actual npz contents.
+    """
+    graphs = []
+    for m in meta_graphs:
+        scene_version = m["scene_version"]
+        split_id = m["split_id"]
+        pair_path = m["pair_path"]
+
+        data = np.load(pair_path, allow_pickle=False)
+        emb_i = data["emb_i"]          # (P, L, E) or (P, E)
+        emb_j = data["emb_j"]          # (P, L, E) or (P, E)
+        labels = data["labels"]        # (P,)
+        strengths = data["strengths"]  # (P,)
+
+        graphs.append(
+            dict(
+                scene_version=scene_version,
+                split_id=split_id,
+                emb_i=emb_i,
+                emb_j=emb_j,
+                labels=labels,
+                strengths=strengths,
+            )
+        )
+    return graphs
+
+
+def _split_graphs(
+    graphs: List[Dict],
+    seed: int,
+    train_ratio: float,
+    split_mode: str,
+) -> Tuple[List[Dict], List[Dict], List[str], set, set]:
+    """
+    Split graphs into train/val according to split_mode and train_ratio.
+
+    Returns:
+        train_graphs, val_graphs, base_scenes, train_scenes, val_scenes
+    """
+    if not graphs:
+        return [], [], [], set(), set()
+
+    # Base scene name (without version suffix), e.g. "Adrian" from "Adrian-3"
+    for g in graphs:
+        if "base_scene" not in g:
+            g["base_scene"] = g["scene_version"].split("-")[0]
+
+    base_scenes = sorted({g["base_scene"] for g in graphs})
+
+    if split_mode == "scene_disjoint":
+        scenes_shuffled = sk_shuffle(base_scenes, random_state=seed)
+        n_train = int(len(base_scenes) * train_ratio)
+        train_scenes = set(scenes_shuffled[:n_train])
+        val_scenes = set(scenes_shuffled[n_train:])
+        train_graphs = [g for g in graphs if g["base_scene"] in train_scenes]
+        val_graphs = [g for g in graphs if g["base_scene"] in val_scenes]
+
+    elif split_mode == "version_disjoint":
+        scene_versions = sorted({g["scene_version"] for g in graphs})
+        scene_versions_shuffled = sk_shuffle(scene_versions, random_state=seed)
+        n_train = int(len(scene_versions) * train_ratio)
+        train_versions = set(scene_versions_shuffled[:n_train])
+        val_versions = set(scene_versions_shuffled[n_train:])
+        train_graphs = [g for g in graphs if g["scene_version"] in train_versions]
+        val_graphs = [g for g in graphs if g["scene_version"] in val_versions]
+        train_scenes = {g["base_scene"] for g in train_graphs}
+        val_scenes = {g["base_scene"] for g in val_graphs}
+
+    elif split_mode == "graph":
+        all_idx = list(range(len(graphs)))
+        all_idx = sk_shuffle(all_idx, random_state=seed)
+        n_train_graphs = int(len(all_idx) * train_ratio)
+        train_idx = all_idx[:n_train_graphs]
+        val_idx = all_idx[n_train_graphs:]
+        train_graphs = [graphs[i] for i in train_idx]
+        val_graphs = [graphs[i] for i in val_idx]
+        train_scenes = {g["base_scene"] for g in train_graphs}
+        val_scenes = {g["base_scene"] for g in val_graphs}
+    else:
+        raise ValueError(
+            f"Invalid split_mode '{split_mode}'. "
+            f"Valid: 'scene_disjoint', 'version_disjoint', 'graph'."
+        )
+
+    return train_graphs, val_graphs, base_scenes, train_scenes, val_scenes
 
 
 # -------------------------------------------------------
@@ -278,97 +370,33 @@ def build_dataloaders_pairs(
     emb_mode: str = "avg",
 ) -> Tuple[DataLoader, DataLoader, Dataset, Dataset, Dict]:
     """
-    Build dataloaders directly from pair-level embeddings:
-
-      data/predictions_feat/{scene_version}/split_{split_id}/pair_embs/pairs.npz
-
-    Args largely mirror load_dataset.build_dataloaders.
-
-    Args:
-        dataset_type: "gibson" (default) or "hm3d", used to pick gvgg/hvgg roots.
-        split_mode: "scene_disjoint", "version_disjoint", or "graph" (same semantics as load_dataset).
-        ...
+    Build dataloaders directly from pair-level embeddings for a single dataset
+    (either Gibson or HM3D), splitting that dataset into train/val.
     """
-    global PRED_ROOT
     if dataset_type == "hm3d":
-        PRED_ROOT = "data/predictions_feat/hvgg"
+        pred_root = "data/predictions_feat/hvgg"
     else:
-        PRED_ROOT = "data/predictions_feat/gvgg"
+        pred_root = "data/predictions_feat/gvgg"
 
     random.seed(seed)
     np.random.seed(seed)
 
-    # 1) Discover all pair graphs
-    meta_graphs = _discover_pair_graphs(emb_mode=emb_mode)
+    # 1) Discover all pair graphs for this dataset
+    meta_graphs = _discover_pair_graphs(emb_mode=emb_mode, pred_root=pred_root)
 
     # 2) Load each pairs.npz into memory
-    graphs = []
-    for m in meta_graphs:
-        scene_version = m["scene_version"]
-        split_id = m["split_id"]
-        pair_path = m["pair_path"]
-
-        data = np.load(pair_path, allow_pickle=False)
-        emb_i = data["emb_i"]          # (P, L, E) or (P, E)
-        emb_j = data["emb_j"]          # (P, L, E) or (P, E)
-        labels = data["labels"]        # (P,)
-        strengths = data["strengths"]  # (P,)
-
-        graphs.append(
-            dict(
-                scene_version=scene_version,
-                split_id=split_id,
-                emb_i=emb_i,
-                emb_j=emb_j,
-                labels=labels,
-                strengths=strengths,
-            )
-        )
+    graphs = _load_graphs_from_meta(meta_graphs)
 
     if not graphs:
-        raise RuntimeError("No valid pair graphs found in predictions_feat.")
-
-    # Base scene name (without version suffix), e.g. "Adrian" from "Adrian-3"
-    for g in graphs:
-        g["base_scene"] = g["scene_version"].split("-")[0]
-
-    base_scenes = sorted({g["base_scene"] for g in graphs})
+        raise RuntimeError(f"No valid pair graphs found in predictions_feat for dataset_type='{dataset_type}'.")
 
     # 3) Split strategy (scene_disjoint / version_disjoint / graph)
-    if split_mode == "scene_disjoint":
-        scenes_shuffled = sk_shuffle(base_scenes, random_state=seed)
-        n_train = int(len(base_scenes) * train_ratio)
-        train_scenes = set(scenes_shuffled[:n_train])
-        val_scenes = set(scenes_shuffled[n_train:])
-        train_graphs = [g for g in graphs if g["base_scene"] in train_scenes]
-        val_graphs = [g for g in graphs if g["base_scene"] in val_scenes]
-
-    elif split_mode == "version_disjoint":
-        scene_versions = sorted({g["scene_version"] for g in graphs})
-        scene_versions_shuffled = sk_shuffle(scene_versions, random_state=seed)
-        n_train = int(len(scene_versions) * train_ratio)
-        train_versions = set(scene_versions_shuffled[:n_train])
-        val_versions = set(scene_versions_shuffled[n_train:])
-        train_graphs = [g for g in graphs if g["scene_version"] in train_versions]
-        val_graphs = [g for g in graphs if g["scene_version"] in val_versions]
-        train_scenes = {g["base_scene"] for g in train_graphs}
-        val_scenes = {g["base_scene"] for g in val_graphs}
-
-    elif split_mode == "graph":
-        all_idx = list(range(len(graphs)))
-        all_idx = sk_shuffle(all_idx, random_state=seed)
-        n_train_graphs = int(len(all_idx) * train_ratio)
-        train_idx = all_idx[:n_train_graphs]
-        val_idx = all_idx[n_train_graphs:]
-        train_graphs = [graphs[i] for i in train_idx]
-        val_graphs = [graphs[i] for i in val_idx]
-        train_scenes = {g["base_scene"] for g in train_graphs}
-        val_scenes = {g["base_scene"] for g in val_graphs}
-    else:
-        raise ValueError(
-            f"Invalid split_mode '{split_mode}'. "
-            f"Valid: 'scene_disjoint', 'version_disjoint', 'graph'."
-        )
+    train_graphs, val_graphs, base_scenes, train_scenes, val_scenes = _split_graphs(
+        graphs,
+        seed=seed,
+        train_ratio=train_ratio,
+        split_mode=split_mode,
+    )
 
     # 4) Build datasets
     train_ds = EdgePairDatasetPairs(
@@ -402,7 +430,6 @@ def build_dataloaders_pairs(
         drop_last=False,
     )
 
-    # Meta info
     emb_dim = graphs[0]["emb_i"].shape[-1]
     meta = dict(
         num_graphs=len(graphs),
@@ -424,6 +451,156 @@ def build_dataloaders_pairs(
     print(
         f"[INFO] Scenes: total={meta['num_scenes']}, "
         f"train={meta['num_train_scenes']}, val={meta['num_val_scenes']}"
+    )
+    print(f"[INFO] Pair embedding dim: {meta['emb_dim']}")
+
+    return train_loader, val_loader, train_ds, val_ds, meta
+
+
+# -------------------------------------------------------
+# Cross-dataset builder for pair embeddings
+# -------------------------------------------------------
+def build_dataloaders_pairs_cross(
+    train_dataset_type: str,
+    eval_dataset_type: str,
+    batch_size: int = 64,
+    num_workers: int = 4,
+    seed: int = 0,
+    max_neg_ratio: float = 1.0,
+    hard_neg_ratio: float = 0.5,
+    hard_neg_rel_thr: float = 0.3,
+    layer_mode: str = "1st_last",
+    split_mode: str = "scene_disjoint",
+    emb_mode: str = "avg",
+    train_train_ratio: float = None,
+    eval_train_ratio: float = None,
+) -> Tuple[DataLoader, DataLoader, Dataset, Dataset, Dict]:
+    """
+    Build dataloaders for cross-dataset training:
+
+      - Load train_dataset_type (e.g. 'hm3d'), split it with train_train_ratio
+        and keep ONLY the train split for training.
+      - Load eval_dataset_type (e.g. 'gibson'), split it with eval_train_ratio
+        and keep ONLY the validation split for evaluation.
+
+    Example: train_dataset_type='hm3d', eval_dataset_type='gibson'
+      - HM3D uses 0.9 train ratio (keep only that part for training).
+      - Gibson uses 0.8 train ratio (keep only the held-out 20% for validation).
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    def _root_for(dtype: str) -> str:
+        return "data/predictions_feat/hvgg" if dtype == "hm3d" else "data/predictions_feat/gvgg"
+
+    # Default train ratios if not provided
+    if train_train_ratio is None:
+        train_train_ratio = 0.8 if train_dataset_type == "gibson" else 0.9
+    if eval_train_ratio is None:
+        eval_train_ratio = 0.8 if eval_dataset_type == "gibson" else 0.9
+
+    # --------- TRAIN DATASET ---------
+    train_root = _root_for(train_dataset_type)
+    train_meta_graphs = _discover_pair_graphs(emb_mode=emb_mode, pred_root=train_root)
+    train_graphs_all = _load_graphs_from_meta(train_meta_graphs)
+    if not train_graphs_all:
+        raise RuntimeError(f"No valid pair graphs found for train_dataset_type='{train_dataset_type}'.")
+
+    (
+        train_graphs_train,
+        train_graphs_val_unused,
+        base_scenes_train,
+        train_scenes_train,
+        val_scenes_train_unused,
+    ) = _split_graphs(
+        train_graphs_all,
+        seed=seed,
+        train_ratio=train_train_ratio,
+        split_mode=split_mode,
+    )
+
+    # --------- EVAL DATASET ---------
+    eval_root = _root_for(eval_dataset_type)
+    eval_meta_graphs = _discover_pair_graphs(emb_mode=emb_mode, pred_root=eval_root)
+    eval_graphs_all = _load_graphs_from_meta(eval_meta_graphs)
+    if not eval_graphs_all:
+        raise RuntimeError(f"No valid pair graphs found for eval_dataset_type='{eval_dataset_type}'.")
+
+    (
+        eval_graphs_train_unused,
+        eval_graphs_val,
+        base_scenes_eval,
+        train_scenes_eval_unused,
+        val_scenes_eval,
+    ) = _split_graphs(
+        eval_graphs_all,
+        seed=seed,
+        train_ratio=eval_train_ratio,
+        split_mode=split_mode,
+    )
+
+    # --------- Build datasets/loaders ---------
+    train_ds = EdgePairDatasetPairs(
+        train_graphs_train,
+        max_neg_ratio=max_neg_ratio,
+        hard_neg_ratio=hard_neg_ratio,
+        hard_neg_rel_thr=hard_neg_rel_thr,
+        layer_mode=layer_mode,
+    )
+    val_ds = EdgePairDatasetPairs(
+        eval_graphs_val,
+        max_neg_ratio=max_neg_ratio,
+        hard_neg_ratio=hard_neg_ratio,
+        hard_neg_rel_thr=hard_neg_rel_thr,
+        layer_mode=layer_mode,
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        drop_last=False,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        drop_last=False,
+    )
+
+    emb_dim_train = train_graphs_all[0]["emb_i"].shape[-1]
+    emb_dim_eval = eval_graphs_all[0]["emb_i"].shape[-1]
+    if emb_dim_train != emb_dim_eval:
+        raise ValueError(
+            f"Embedding dims differ between datasets: {emb_dim_train} (train) vs {emb_dim_eval} (eval)."
+        )
+    emb_dim = emb_dim_train
+
+    all_base_scenes = sorted(set(base_scenes_train) | set(base_scenes_eval))
+
+    meta = dict(
+        num_graphs=len(train_graphs_all) + len(eval_graphs_all),
+        num_train_graphs=len(train_graphs_train),
+        num_val_graphs=len(eval_graphs_val),
+        num_scenes=len(all_base_scenes),
+        num_train_scenes=len(train_scenes_train),
+        num_val_scenes=len(val_scenes_eval),
+        emb_dim=emb_dim,
+        split_mode=split_mode,
+        train_dataset_type=train_dataset_type,
+        eval_dataset_type=eval_dataset_type,
+        emb_mode=emb_mode,
+    )
+
+    print(
+        f"[INFO] Cross Pair graphs (train={train_dataset_type}, eval={eval_dataset_type}): "
+        f"train_graphs={meta['num_train_graphs']}, val_graphs={meta['num_val_graphs']}"
+    )
+    print(
+        f"[INFO] Scenes (train={train_dataset_type}, eval={eval_dataset_type}): "
+        f"total={meta['num_scenes']}, train={meta['num_train_scenes']}, val={meta['num_val_scenes']}"
     )
     print(f"[INFO] Pair embedding dim: {meta['emb_dim']}")
 

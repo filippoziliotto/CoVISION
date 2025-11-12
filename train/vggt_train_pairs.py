@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 # Dataset import: load_dataset_pairs.py
 # ---------------------------------------------------------------------
-from dataset.load_dataset_pairs import build_dataloaders_pairs
+from dataset.load_dataset_pairs import build_dataloaders_pairs, build_dataloaders_pairs_cross
 from utils.utils import set_seed, pairwise_ranking_loss
 from models.PairView import MultiLayerEdgeClassifier, EdgeClassifier
 
@@ -442,11 +442,6 @@ def main():
         type=int,
         default=32,
     )
-    parser.add_argument(
-        "--max_neg_ratio",
-        type=float,
-        default=1.0,
-    )
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", type=str, default="mps")
     parser.add_argument("--out_dir", type=str, default="train/classifier_pairs")
@@ -562,15 +557,26 @@ def main():
         help="If set, do not subsample negatives (keep all data). Overrides max_neg_ratio.",
     )
     parser.add_argument(
-        "--max_neg_ratio",
-        type=float,
-        default=1.0,
-    )
-    parser.add_argument(
         "--hard_neg_ratio",
         type=float,
         default=0.5,
         help="Fraction of sampled negatives that are hard.",
+    )
+    parser.add_argument(
+        "--max_neg_ratio",
+        type=float,
+        default=1.0,
+        help="Maximum number of negatives to keep per positive (ratio). Use <=0 to keep all negatives.",
+    )
+    parser.add_argument(
+        "--eval_dataset_type",
+        type=str,
+        default=None,
+        choices=["hm3d", "gibson"],
+        help=(
+            "If set (and different from --dataset_type), train on --dataset_type "
+            "and evaluate on this dataset type using a held-out split."
+        ),
     )
     args = parser.parse_args()
 
@@ -610,19 +616,37 @@ def main():
             use_wandb = False
 
     # Build dataloaders (pair-level)
-    train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders_pairs(
-        dataset_type=args.dataset_type,
-        batch_size=args.batch_size,
-        seed=args.seed,
-        num_workers=4,
-        train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
-        max_neg_ratio=args.max_neg_ratio if not args.keep_all_data else -1.0,
-        hard_neg_ratio=args.hard_neg_ratio,
-        hard_neg_rel_thr=0.3,
-        layer_mode=args.layer_mode,
-        split_mode=args.data_split_mode,
-        emb_mode=args.emb_mode,
-    )
+    if args.eval_dataset_type is not None and args.eval_dataset_type != args.dataset_type:
+        # Cross-dataset setup: train on args.dataset_type, evaluate on args.eval_dataset_type
+        train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders_pairs_cross(
+            train_dataset_type=args.dataset_type,
+            eval_dataset_type=args.eval_dataset_type,
+            batch_size=args.batch_size,
+            seed=args.seed,
+            num_workers=4,
+            max_neg_ratio=args.max_neg_ratio if not args.keep_all_data else -1.0,
+            hard_neg_ratio=args.hard_neg_ratio,
+            hard_neg_rel_thr=0.3,
+            layer_mode=args.layer_mode,
+            split_mode=args.data_split_mode,
+            emb_mode=args.emb_mode,
+        )
+    else:
+        # Standard single-dataset setup: train and eval on the same dataset
+        default_train_ratio = 0.8 if args.dataset_type == "gibson" else 0.9
+        train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders_pairs(
+            dataset_type=args.dataset_type,
+            batch_size=args.batch_size,
+            seed=args.seed,
+            num_workers=4,
+            train_ratio=default_train_ratio,
+            max_neg_ratio=args.max_neg_ratio if not args.keep_all_data else -1.0,
+            hard_neg_ratio=args.hard_neg_ratio,
+            hard_neg_rel_thr=0.3,
+            layer_mode=args.layer_mode,
+            split_mode=args.data_split_mode,
+            emb_mode=args.emb_mode,
+        )
 
     print(
         f"[INFO] Dataset: train_pairs={len(train_ds)}, "
