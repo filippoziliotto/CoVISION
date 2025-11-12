@@ -611,6 +611,13 @@ def main():
         action="store_true",
         help="If set, do not subsample negatives (keep all data). Overrides max_neg_ratio.",
     )
+    parser.add_argument(
+        "--head_type",
+        type=str,
+        default="edge",
+        choices=["edge", "gated"],
+        help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -795,8 +802,19 @@ def main():
         raise ValueError(f"Unexpected feature batch shape: {feat_i_batch.shape}")
     print(f"[INFO] Embedding dim: {emb_dim}")
 
-    classifier = EdgeClassifier(emb_dim=emb_dim, hidden_dim=args.hidden_dim).to(device)
-    #classifier = GatedLayerFusion(emb_dim=emb_dim,hidden_dim=256,vec_gate=False).to(device)
+    if args.head_type == "edge":
+        classifier = EdgeClassifier(
+            emb_dim=emb_dim,
+            hidden_dim=args.hidden_dim,
+        ).to(device)
+    elif args.head_type == "gated":
+        classifier = GatedLayerFusion(
+            emb_dim=emb_dim,
+            hidden_dim=args.hidden_dim,
+            vec_gate=False,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown head_type '{args.head_type}'. Expected 'edge' or 'gated'.")
     
     # Trainable parameters
     n_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
