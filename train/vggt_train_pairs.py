@@ -30,6 +30,10 @@ from utils.utils import (
     focal_bce_with_logits,
     plot_iou_curves,
     plot_training_history,
+    setup_wandb,
+    wandb_log,
+    wandb_save,
+    wandb_finish,
 )
 from models.PairView import EdgeClassifier, GatedLayerFusion, AttentiveLayerFusion
 from train.args import build_pairview_parser
@@ -462,30 +466,13 @@ def main():
     print(f"[INFO] Using device: {device}")
 
     # Wandb (optional)
-    try:
-        import wandb
-        _wandb_available = hasattr(wandb, "init")
-        if not _wandb_available:
-            print("[WARN] wandb imported but has no 'init' attribute. Disabling wandb logging.")
-    except ImportError:
-        wandb = None  # type: ignore
-        _wandb_available = False
-
-    use_wandb = (
-        (not args.wandb_off)
-        and _wandb_available
-        and (args.wandb_project is not None)
+    wandb_run = setup_wandb(
+        project=args.wandb_project,
+        run_name=args.wandb_run_name,
+        config=vars(args),
+        disabled=args.wandb_off,
     )
-    if use_wandb:
-        try:
-            wandb.init(
-                project=args.wandb_project,
-                name=args.wandb_run_name,
-                config=vars(args),
-            )
-        except Exception as e:
-            print(f"[WARN] Failed to initialize wandb ({e}). Disabling wandb logging.")
-            use_wandb = False
+    use_wandb = wandb_run is not None
 
     # Build dataloaders (pair-level)
     if args.eval_dataset_type is not None and args.eval_dataset_type != args.dataset_type:
@@ -611,24 +598,24 @@ def main():
             title="Zero-shot Graph IoU vs Threshold",
         )
 
-        if use_wandb:
-            wandb.log(
-                {
-                    "zero_shot_train_acc": train_metrics["acc"],
-                    "zero_shot_train_f1": train_metrics["f1"],
-                    "zero_shot_train_roc_auc": train_metrics["roc_auc"],
-                    "zero_shot_train_pr_auc": train_metrics["pr_auc"],
-                    "zero_shot_train_graph_iou_best": train_metrics["graph_iou_best"],
-                    "zero_shot_train_graph_iou_auc": train_metrics["graph_iou_auc"],
-                    "zero_shot_val_acc": val_metrics["acc"],
-                    "zero_shot_val_f1": val_metrics["f1"],
-                    "zero_shot_val_roc_auc": val_metrics["roc_auc"],
-                    "zero_shot_val_pr_auc": val_metrics["pr_auc"],
-                    "zero_shot_val_graph_iou_best": val_metrics["graph_iou_best"],
-                    "zero_shot_val_graph_iou_auc": val_metrics["graph_iou_auc"],
-                }
-            )
-            wandb.finish()
+        wandb_log(
+            wandb_run,
+            {
+                "zero_shot_train_acc": train_metrics["acc"],
+                "zero_shot_train_f1": train_metrics["f1"],
+                "zero_shot_train_roc_auc": train_metrics["roc_auc"],
+                "zero_shot_train_pr_auc": train_metrics["pr_auc"],
+                "zero_shot_train_graph_iou_best": train_metrics["graph_iou_best"],
+                "zero_shot_train_graph_iou_auc": train_metrics["graph_iou_auc"],
+                "zero_shot_val_acc": val_metrics["acc"],
+                "zero_shot_val_f1": val_metrics["f1"],
+                "zero_shot_val_roc_auc": val_metrics["roc_auc"],
+                "zero_shot_val_pr_auc": val_metrics["pr_auc"],
+                "zero_shot_val_graph_iou_best": val_metrics["graph_iou_best"],
+                "zero_shot_val_graph_iou_auc": val_metrics["graph_iou_auc"],
+            },
+        )
+        wandb_finish(wandb_run)
 
         return
 
@@ -789,27 +776,27 @@ def main():
             f"best_val_graph_iou_auc={best_val_graph_iou_auc:.3f}"
         )
 
-        if use_wandb:
-            wandb.log(
-                {
-                    "epoch": epoch,
-                    "train_loss": train_metrics["loss"],
-                    "train_acc": train_metrics["acc"],
-                    "train_f1": train_metrics["f1"],
-                    "train_soft_iou": train_metrics["soft_iou"],
-                    "val_loss": val_metrics["loss"],
-                    "val_acc": val_metrics["acc"],
-                    "val_f1": val_metrics["f1"],
-                    "val_roc_auc": val_metrics["roc_auc"],
-                    "val_pr_auc": val_metrics["pr_auc"],
-                    "val_graph_iou_best": val_metrics["graph_iou_best"],
-                    "val_graph_iou_auc": val_metrics["graph_iou_auc"],
-                    "val_graph_iou_best_thres": val_metrics["graph_iou_best_thres"],
-                    "val_soft_iou": val_metrics["soft_iou"],
-                    "lr": current_lr,
-                },
-                step=epoch,
-            )
+        wandb_log(
+            wandb_run,
+            {
+                "epoch": epoch,
+                "train_loss": train_metrics["loss"],
+                "train_acc": train_metrics["acc"],
+                "train_f1": train_metrics["f1"],
+                "train_soft_iou": train_metrics["soft_iou"],
+                "val_loss": val_metrics["loss"],
+                "val_acc": val_metrics["acc"],
+                "val_f1": val_metrics["f1"],
+                "val_roc_auc": val_metrics["roc_auc"],
+                "val_pr_auc": val_metrics["pr_auc"],
+                "val_graph_iou_best": val_metrics["graph_iou_best"],
+                "val_graph_iou_auc": val_metrics["graph_iou_auc"],
+                "val_graph_iou_best_thres": val_metrics["graph_iou_best_thres"],
+                "val_soft_iou": val_metrics["soft_iou"],
+                "lr": current_lr,
+            },
+            step=epoch,
+        )
 
         history["train_loss"].append(train_metrics["loss"])
         history["val_loss"].append(val_metrics["loss"])
@@ -867,9 +854,8 @@ def main():
     )
     print(f"[INFO] Saved classifier to {clf_path}")
 
-    if use_wandb:
-        wandb.save(clf_path)
-        wandb.finish()
+    wandb_save(wandb_run, clf_path)
+    wandb_finish(wandb_run)
 
 
 if __name__ == "__main__":

@@ -192,3 +192,49 @@ def plot_training_history(history: dict, plots_dir: str) -> None:
         plt.title("Train/Val Soft IoU")
         plt.legend()
         _save(os.path.join(plots_dir, "soft_iou.png"))
+
+
+# ---------------------------------------------------------------------
+# Wandb helpers (lazy import, optional)
+# ---------------------------------------------------------------------
+def setup_wandb(project: Optional[str], run_name: Optional[str], config: dict, disabled: bool):
+    """Initialize wandb if available/enabled, else return None."""
+    if disabled or project is None:
+        return None
+    try:
+        import wandb  # type: ignore
+        if not hasattr(wandb, "init"):
+            print("[WARN] wandb imported but has no 'init' attribute. Disabling wandb logging.")
+            return None
+        wandb.init(project=project, name=run_name, config=config)
+        return wandb
+    except Exception as e:
+        print(f"[WARN] Failed to initialize wandb ({e}). Disabling wandb logging.")
+        return None
+
+
+def wandb_log(wandb_ref, data: dict, step: Optional[int] = None) -> None:
+    if wandb_ref is None:
+        return
+    try:
+        wandb_ref.log(data, step=step)
+    except Exception as e:
+        print(f"[WARN] wandb.log failed: {e}")
+
+
+def wandb_save(wandb_ref, path: str) -> None:
+    if wandb_ref is None:
+        return
+    try:
+        wandb_ref.save(path)
+    except Exception as e:
+        print(f"[WARN] wandb.save failed for {path}: {e}")
+
+
+def wandb_finish(wandb_ref) -> None:
+    if wandb_ref is None:
+        return
+    try:
+        wandb_ref.finish()
+    except Exception as e:
+        print(f"[WARN] wandb.finish failed: {e}")
