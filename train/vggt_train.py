@@ -640,14 +640,21 @@ def main():
         f"(lr={args.lr}, weight_decay={args.weight_decay})"
     )
 
-    # LR scheduler (ReduceLROnPlateau on validation Graph IoU AUC)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",  # maximize val_graph_iou_auc
-        factor=args.lr_factor,
-        patience=args.lr_patience,
-        #verbose=True,
-    )
+    # LR scheduler (use validation loss as the metric)
+    scheduler = None
+    if args.lr_scheduler == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",  # monitor val_loss
+            factor=args.lr_factor,
+            patience=args.lr_patience,
+        )
+    elif args.lr_scheduler == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=args.lr_step_size,
+            gamma=args.lr_factor,
+        )
 
     # Early stopping state (based on val_graph_iou_auc, higher is better)
     best_val_graph_iou_auc = -float("inf")
@@ -731,7 +738,11 @@ def main():
         )
 
         # Step LR scheduler on validation Graph IoU AUC
-        scheduler.step(val_metrics["graph_iou_auc"])
+        if scheduler is not None:
+            if args.lr_scheduler == "plateau":
+                scheduler.step(val_metrics["loss"])
+            else:
+                scheduler.step()
 
         # Early stopping logic based on validation Graph IoU AUC
         current_val_iou_auc = val_metrics["graph_iou_auc"]

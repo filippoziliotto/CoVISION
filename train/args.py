@@ -84,6 +84,19 @@ def build_multiview_parser() -> argparse.ArgumentParser:
         help="LR scheduler patience in epochs (ReduceLROnPlateau).",
     )
     parser.add_argument(
+        "--lr_scheduler",
+        type=str,
+        default="plateau",
+        choices=["plateau", "step", "none"],
+        help="LR scheduler type. Always monitors validation loss.",
+    )
+    parser.add_argument(
+        "--lr_step_size",
+        type=int,
+        default=10,
+        help="Step size (epochs) for StepLR when --lr_scheduler=step.",
+    )
+    parser.add_argument(
         "--zero_shot",
         action="store_true",
         help="If set, run zero-shot evaluation using cosine similarity only (no training).",
@@ -196,7 +209,7 @@ def build_multiview_parser() -> argparse.ArgumentParser:
         "--head_type",
         type=str,
         default="edge",
-        choices=["edge", "gated"],
+        choices=["edge", "gated", "attention"],
         help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
     )
     parser.add_argument("--split_index_path", type=str, default=None,
@@ -264,6 +277,19 @@ def build_pairview_parser() -> argparse.ArgumentParser:
         "--lr_patience",
         type=int,
         default=3,
+    )
+    parser.add_argument(
+        "--lr_scheduler",
+        type=str,
+        default="plateau",
+        choices=["plateau", "step", "none"],
+        help="LR scheduler type. Always monitors validation loss.",
+    )
+    parser.add_argument(
+        "--lr_step_size",
+        type=int,
+        default=10,
+        help="Step size (epochs) for StepLR when --lr_scheduler=step.",
     )
     parser.add_argument(
         "--zero_shot",
@@ -386,7 +412,7 @@ def build_pairview_parser() -> argparse.ArgumentParser:
         "--head_type",
         type=str,
         default="edge",
-        choices=["edge", "gated"],
+        choices=["edge", "gated", "attention"],
         help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
     )
     parser.add_argument(

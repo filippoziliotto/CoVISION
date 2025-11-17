@@ -670,13 +670,21 @@ def main():
         f"(lr={args.lr}, weight_decay={args.weight_decay})"
     )
 
-    # LR scheduler on val Graph IoU AUC
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=args.lr_factor,
-        patience=args.lr_patience,
-    )
+    # LR scheduler using validation loss
+    scheduler = None
+    if args.lr_scheduler == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=args.lr_factor,
+            patience=args.lr_patience,
+        )
+    elif args.lr_scheduler == "step":
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=args.lr_step_size,
+            gamma=args.lr_factor,
+        )
 
     best_val_graph_iou_auc = -float("inf")
     epochs_no_improve = 0
@@ -756,7 +764,11 @@ def main():
             f"val_graph_iou_auc={val_metrics['graph_iou_auc']:.3f}"
         )
 
-        scheduler.step(val_metrics["graph_iou_auc"])
+        if scheduler is not None:
+            if args.lr_scheduler == "plateau":
+                scheduler.step(val_metrics["loss"])
+            else:
+                scheduler.step()
 
         current_val_iou_auc = val_metrics["graph_iou_auc"]
         if (
