@@ -3,6 +3,7 @@ import os
 import glob
 from typing import List, Dict, Tuple
 import random
+import json
 
 import numpy as np
 import pandas as pd
@@ -15,7 +16,7 @@ PRED_ROOT = "data/predictions_feat/gvgg"
 GIBSON_BASE_PATTERN = "data/vast/cc7287/gvgg-{i}"  # i in [1..5]
 HM3D_BASE_PATTERN = "data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg/part{i}"  # i in [a,b,c,d,e,f,g,h,i,l]
 HM3D_PARTS = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "l"]
-
+DEBUG = False
 
 # -------------------------------------------------------
 # Utilities
@@ -212,6 +213,99 @@ def _build_adjacency_from_gt(gt_csv_path: str, saved_obs_dir: str, N: int) -> np
 
 
 # -------------------------------------------------------
+# Deterministic meta-level split helpers for scene splits
+# -------------------------------------------------------
+def _split_split_meta(
+    split_meta: List[Dict],
+    seed: int,
+    train_ratio: float,
+    split_mode: str,
+) -> Tuple[List[Dict], List[Dict], List[str], set, set]:
+    """
+    Split the list returned by _discover_scene_splits into train/val meta lists.
+    """
+    if not split_meta:
+        return [], [], [], set(), set()
+
+    for m in split_meta:
+        if "base_scene" not in m:
+            # Gibson uses 'SceneName-version'; HM3D has no '-version'
+            m["base_scene"] = m["scene_version"].split("-")[0]
+
+    base_scenes = sorted({m["base_scene"] for m in split_meta})
+
+    if split_mode == "scene_disjoint":
+        scenes_shuffled = sk_shuffle(base_scenes, random_state=seed)
+        n_train = int(len(base_scenes) * train_ratio)
+        train_scenes = set(scenes_shuffled[:n_train])
+        val_scenes = set(scenes_shuffled[n_train:])
+        train_meta = [m for m in split_meta if m["base_scene"] in train_scenes]
+        val_meta = [m for m in split_meta if m["base_scene"] in val_scenes]
+
+    elif split_mode == "version_disjoint":
+        scene_versions = sorted({m["scene_version"] for m in split_meta})
+        scene_versions_shuffled = sk_shuffle(scene_versions, random_state=seed)
+        n_train = int(len(scene_versions) * train_ratio)
+        train_versions = set(scene_versions_shuffled[:n_train])
+        val_versions = set(scene_versions_shuffled[n_train:])
+        train_meta = [m for m in split_meta if m["scene_version"] in train_versions]
+        val_meta = [m for m in split_meta if m["scene_version"] in val_versions]
+        train_scenes = {m["base_scene"] for m in train_meta}
+        val_scenes = {m["base_scene"] for m in val_meta}
+
+    elif split_mode == "graph":
+        all_idx = list(range(len(split_meta)))
+        all_idx = sk_shuffle(all_idx, random_state=seed)
+        n_train_graphs = int(len(all_idx) * train_ratio)
+        train_idx = set(all_idx[:n_train_graphs])
+        val_idx = set(all_idx[n_train_graphs:])
+        train_meta = [split_meta[i] for i in all_idx if i in train_idx]
+        val_meta = [split_meta[i] for i in all_idx if i in val_idx]
+        train_scenes = {m["base_scene"] for m in train_meta}
+        val_scenes = {m["base_scene"] for m in val_meta}
+    else:
+        raise ValueError(
+            f"Invalid split_mode '{split_mode}'. "
+            f"Valid values are 'scene_disjoint', 'version_disjoint', and 'graph'."
+        )
+
+    return train_meta, val_meta, base_scenes, train_scenes, val_scenes
+
+
+def _load_split_index_raw(path: str) -> Dict:
+    with open(path, "r") as f:
+        js = json.load(f)
+    if "train" not in js or "val" not in js:
+        raise ValueError(f"Split index at {path} missing 'train'/'val' keys.")
+    return js
+
+
+def _write_split_index_raw(
+    path: str,
+    train_meta: List[Dict],
+    val_meta: List[Dict],
+    *,
+    seed: int,
+    train_ratio: float,
+    split_mode: str,
+    dataset_type: str,
+    emb_mode: str,
+) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "info": {
+            "seed": seed,
+            "train_ratio": train_ratio,
+            "split_mode": split_mode,
+            "dataset_type": dataset_type,
+            "emb_mode": emb_mode,
+            "source": "load_dataset.py",
+        },
+        "train": [{"scene_version": m["scene_version"], "split_id": m["split_id"]} for m in train_meta],
+        "val": [{"scene_version": m["scene_version"], "split_id": m["split_id"]} for m in val_meta],
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
 # Dataset: edge-level pairs from (embeddings, adjacency)
 # -------------------------------------------------------
 class EdgePairDataset(Dataset):
@@ -329,9 +423,10 @@ class EdgePairDataset(Dataset):
             num_neg_total = num_neg_hard + num_neg_easy
             scene_version = g.get("scene_version", "?")
             split_id = g.get("split_id", "?")
-            print(
-                f"[DEBUG] Graph {scene_version} split {split_id}: N={N}, pos={num_pos}, neg_hard={num_neg_hard}, neg_easy={num_neg_easy}, neg_total={num_neg_total}"
-            )
+            if DEBUG:
+                print(
+                    f"[DEBUG] Graph {scene_version} split {split_id}: N={N}, pos={num_pos}, neg_hard={num_neg_hard}, neg_easy={num_neg_easy}, neg_total={num_neg_total}"
+                )
 
             if num_pos == 0:
                 print(
@@ -369,9 +464,10 @@ class EdgePairDataset(Dataset):
                     sampled_neg.extend(random.sample(neg_pairs_easy, k_easy))
 
             kept_neg = len(sampled_neg)
-            print(
-                f"[DEBUG] Kept negatives for {scene_version} split {split_id}: kept={kept_neg} / total={num_neg_total}"
-            )
+            if DEBUG:
+                print(
+                    f"[DEBUG] Kept negatives for {scene_version} split {split_id}: kept={kept_neg} / total={num_neg_total}"
+                )
 
             self.pairs.extend(sampled_neg)
             total_neg += kept_neg
@@ -397,6 +493,9 @@ class EdgePairDataset(Dataset):
 # -------------------------------------------------------
 # Main builder: from gvgg-1..5 + predictions_feat
 # -------------------------------------------------------
+# -------------------------------------------------------
+# Deterministic meta-level split and subset loading
+# -------------------------------------------------------
 def build_dataloaders(
     dataset_type: str = "gibson",
     batch_size: int = 64,
@@ -409,26 +508,15 @@ def build_dataloaders(
     layer_mode: str = "1st_last",
     split_mode: str = "scene_disjoint",
     emb_mode: str = "avg_max",
+    subset: str = "both",                 # new
+    split_index_path: str = None,         # new
+    persist_split_index: bool = False,    # new
 ) -> Tuple[DataLoader, DataLoader, Dataset, Dataset, Dict]:
     """
-    Discover all (scene_version, split) graphs across gvgg-1..5,
-    load embeddings + GT adjacency, split into train/val, and build edge-level dataloaders.
-
-    Args:
-        batch_size: int, DataLoader batch size.
-        num_workers: int, DataLoader num_workers.
-        train_ratio: float, fraction of data for training.
-        seed: int, random seed.
-        max_neg_ratio: float, max negative:positive ratio.
-        hard_neg_ratio: float, fraction of negatives that should be "hard".
-        hard_neg_rel_thr: float, minimum rel_mat value for a negative to be "hard".
-        layer_mode: str, which VGGT layer(s) to use.
-        split_mode: str, split strategy. One of:
-            - "scene_disjoint": disjoint base scenes between train and val (all versions of a scene go to the same split).
-            - "version_disjoint": disjoint scene_version between train and val (e.g., Adrian-1 in train, Adrian-2 in val); all splits of a scene_version go to the same side. Base scenes may appear in both splits but with different versions.
-            - "graph": random split over graphs (scene_version + split_id).
-    Returns:
-        train_loader, val_loader, train_ds, val_ds, meta
+    Discover all (scene_version, split) graphs, deterministically split at the meta level,
+    and then load only the requested subset(s). This avoids loading heavy arrays for the
+    unused split and guarantees reproducible splits with the same seed/ratio, optionally
+    persisted to disk.
     """
     # 1) Set PRED_ROOT based on dataset_type
     global PRED_ROOT
@@ -437,109 +525,104 @@ def build_dataloaders(
     else:
         PRED_ROOT = "data/predictions_feat/gvgg"
 
-    # 2) Discover all splits
+    random.seed(seed)
+    np.random.seed(seed)
+
+    # 2) Discover meta (scene_version, split_id, saved_obs) without loading arrays
     split_meta = _discover_scene_splits(dataset_type)
     if not split_meta:
         raise RuntimeError("No scene splits found under dataset roots")
 
-    # 2) Build graph objects with emb + adj + rel (if available)
-    graphs = []
-    for s in split_meta:
-        scene_version = s["scene_version"]
-        split_id = s["split_id"]
-        saved_obs = s["saved_obs"]
-
-        # Embeddings
-        try:
-            emb = _load_embeddings(scene_version, split_id, emb_mode=emb_mode)  # (N, E)
-        except FileNotFoundError as e:
-            print(f"[WARN] {e}")
-            continue
-
-        # GT adjacency
-        gt_csv_path = os.path.join(saved_obs, "GroundTruth.csv")
-        if not os.path.isfile(gt_csv_path):
-            print(f"[WARN] Missing GroundTruth.csv in {saved_obs}, skipping")
-            continue
-
-        if emb.ndim == 3:
-            # emb: (L, N, E)
-            N = emb.shape[1]
-        else:
-            # emb: (N, E)
-            N = emb.shape[0]
-
-        A = _build_adjacency_from_gt(gt_csv_path, saved_obs, N)
-
-        # Continuous edge strengths from rel_mat.npy (if available)
-        rel_mat_path = os.path.join(saved_obs, "rel_mat.npy")
-        if os.path.isfile(rel_mat_path):
-            try:
-                rel = np.load(rel_mat_path)
-            except Exception as e:
-                print(f"[WARN] Failed to load rel_mat.npy in {saved_obs}: {e}")
-                rel = None
-        else:
-            rel = None
-
-        graphs.append(
-            dict(
-                scene_version=scene_version,
-                split_id=split_id,
-                emb=emb,
-                adj=A,
-                rel=rel,
-            )
-        )
-
-    if not graphs:
-        raise RuntimeError("No valid graphs (embeddings + GT) found.")
-
-    # Compute base_scene for each graph
-    for g in graphs:
-        g["base_scene"] = g["scene_version"].split("-")[0]
-
-    # Compute base_scenes once for all split modes
-    base_scenes = sorted({g["base_scene"] for g in graphs})
-
-    # 3) Split strategy
-    if split_mode == "scene_disjoint":
-        # Scene-wise train/val split (by base_scene)
-        scenes_shuffled = sk_shuffle(base_scenes, random_state=seed)
-        n_train = int(len(base_scenes) * train_ratio)
-        train_scenes = set(scenes_shuffled[:n_train])
-        val_scenes = set(scenes_shuffled[n_train:])
-        train_graphs = [g for g in graphs if g["base_scene"] in train_scenes]
-        val_graphs = [g for g in graphs if g["base_scene"] in val_scenes]
-    elif split_mode == "version_disjoint":
-        # Disjoint scene_version between train and val (all splits of a scene_version go to the same side)
-        scene_versions = sorted({g["scene_version"] for g in graphs})
-        scene_versions_shuffled = sk_shuffle(scene_versions, random_state=seed)
-        n_train = int(len(scene_versions) * train_ratio)
-        train_versions = set(scene_versions_shuffled[:n_train])
-        val_versions = set(scene_versions_shuffled[n_train:])
-        train_graphs = [g for g in graphs if g["scene_version"] in train_versions]
-        val_graphs = [g for g in graphs if g["scene_version"] in val_versions]
-        train_scenes = {g["base_scene"] for g in train_graphs}
-        val_scenes = {g["base_scene"] for g in val_graphs}
-    elif split_mode == "graph":
-        # Graph-level random split (scene_version/split_id)
-        all_idx = list(range(len(graphs)))
-        all_idx = sk_shuffle(all_idx, random_state=seed)
-        n_train_graphs = int(len(all_idx) * train_ratio)
-        train_idx = all_idx[:n_train_graphs]
-        val_idx = all_idx[n_train_graphs:]
-        train_graphs = [graphs[i] for i in train_idx]
-        val_graphs = [graphs[i] for i in val_idx]
-        # For meta
-        train_scenes = {g["base_scene"] for g in train_graphs}
-        val_scenes = {g["base_scene"] for g in val_graphs}
+    # 3) Determine deterministic meta split
+    if split_index_path and os.path.isfile(split_index_path):
+        js = _load_split_index_raw(split_index_path)
+        train_keys = {(d["scene_version"], str(d["split_id"])) for d in js["train"]}
+        val_keys = {(d["scene_version"], str(d["split_id"])) for d in js["val"]}
+        train_meta = [m for m in split_meta if (m["scene_version"], m["split_id"]) in train_keys]
+        val_meta = [m for m in split_meta if (m["scene_version"], m["split_id"]) in val_keys]
+        for m in split_meta:
+            if "base_scene" not in m:
+                m["base_scene"] = m["scene_version"].split("-")[0]
+        base_scenes = sorted({m["base_scene"] for m in split_meta})
+        train_scenes = {m["base_scene"] for m in train_meta}
+        val_scenes = {m["base_scene"] for m in val_meta}
     else:
-        raise ValueError(
-            f"Invalid split_mode '{split_mode}'. Valid values are 'scene_disjoint', 'version_disjoint', and 'graph'."
+        train_meta, val_meta, base_scenes, train_scenes, val_scenes = _split_split_meta(
+            split_meta, seed=seed, train_ratio=train_ratio, split_mode=split_mode
         )
+        if split_index_path and persist_split_index:
+            _write_split_index_raw(
+                split_index_path,
+                train_meta,
+                val_meta,
+                seed=seed,
+                train_ratio=train_ratio,
+                split_mode=split_mode,
+                dataset_type=dataset_type,
+                emb_mode=emb_mode,
+            )
 
-    # 4) Build datasets
+    # 4) Load heavy arrays only for the requested subset(s)
+    if subset not in {"both", "train", "val"}:
+        raise ValueError("subset must be one of {'both','train','val'}")
+
+    def _load_graphs_from_meta_raw(meta_list: List[Dict]) -> List[Dict]:
+        graphs = []
+        for s in meta_list:
+            scene_version = s["scene_version"]
+            split_id = s["split_id"]
+            saved_obs = s["saved_obs"]
+
+            # Embeddings
+            try:
+                emb = _load_embeddings(scene_version, split_id, emb_mode=emb_mode)
+            except FileNotFoundError as e:
+                print(f"[WARN] {e}")
+                continue
+
+            # GT adjacency
+            gt_csv_path = os.path.join(saved_obs, "GroundTruth.csv")
+            if not os.path.isfile(gt_csv_path):
+                print(f"[WARN] Missing GroundTruth.csv in {saved_obs}, skipping")
+                continue
+
+            if emb.ndim == 3:
+                N = emb.shape[1]  # (L, N, E)
+            else:
+                N = emb.shape[0]  # (N, E)
+
+            A = _build_adjacency_from_gt(gt_csv_path, saved_obs, N)
+
+            # Continuous edge strengths from rel_mat.npy (if available)
+            rel_mat_path = os.path.join(saved_obs, "rel_mat.npy")
+            if os.path.isfile(rel_mat_path):
+                try:
+                    rel = np.load(rel_mat_path)
+                except Exception as e:
+                    print(f"[WARN] Failed to load rel_mat.npy in {saved_obs}: {e}")
+                    rel = None
+            else:
+                rel = None
+
+            graphs.append(
+                dict(
+                    scene_version=scene_version,
+                    split_id=split_id,
+                    emb=emb,
+                    adj=A,
+                    rel=rel,
+                    base_scene=scene_version.split("-")[0],
+                )
+            )
+        return graphs
+
+    train_graphs = _load_graphs_from_meta_raw(train_meta) if subset in {"both", "train"} else []
+    val_graphs = _load_graphs_from_meta_raw(val_meta)     if subset in {"both", "val"} else []
+
+    if not train_graphs and not val_graphs:
+        raise RuntimeError("No valid graphs (embeddings + GT) found for the requested subset(s).")
+
+    # 5) Build datasets
     train_ds = EdgePairDataset(
         train_graphs,
         max_neg_ratio=max_neg_ratio,
@@ -555,7 +638,7 @@ def build_dataloaders(
         layer_mode=layer_mode,
     )
 
-    # 5) Dataloaders
+    # 6) Dataloaders
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -571,26 +654,34 @@ def build_dataloaders(
         drop_last=False,
     )
 
-    # Meta info for logging
+    # Meta info
+    emb_dim = None
+    if train_graphs:
+        emb_dim = train_graphs[0]["emb"].shape[-1]
+    elif val_graphs:
+        emb_dim = val_graphs[0]["emb"].shape[-1]
+    else:
+        emb_dim = -1
+
     meta = dict(
-        num_graphs=len(graphs),
+        num_graphs=len(train_graphs) + len(val_graphs),
         num_train_graphs=len(train_graphs),
         num_val_graphs=len(val_graphs),
-        num_scenes=len(base_scenes),
-        num_train_scenes=len(train_scenes),
-        num_val_scenes=len(val_scenes),
-        emb_dim=graphs[0]["emb"].shape[-1],
+        num_scenes=len({g["base_scene"] for g in (train_graphs + val_graphs)}),
+        num_train_scenes=len({g["base_scene"] for g in train_graphs}),
+        num_val_scenes=len({g["base_scene"] for g in val_graphs}),
+        emb_dim=emb_dim,
         split_mode=split_mode,
         emb_mode=emb_mode,
+        subset=subset,
+        split_index_path=split_index_path or "",
     )
 
     print(
-        f"[INFO] Found {meta['num_graphs']} valid (scene_version, split) graphs. "
-        f"Scenes: total={meta['num_scenes']}, train={meta['num_train_scenes']}, val={meta['num_val_scenes']}"
+        f"[INFO] Splits (meta): train={len(train_meta)} graphs, val={len(val_meta)} graphs"
     )
     print(
-        f"[INFO] Splits: train_graphs={meta['num_train_graphs']}, "
-        f"val_graphs={meta['num_val_graphs']}"
+        f"[INFO] Loaded graphs: train={meta['num_train_graphs']}, val={meta['num_val_graphs']}"
     )
     print(f"[INFO] Embedding dim: {meta['emb_dim']}")
 
@@ -603,7 +694,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--max_neg_ratio", type=float, default=1.0)
     parser.add_argument("--hard_neg_ratio", type=float, default=0.5)
     parser.add_argument("--hard_neg_rel_thr", type=float, default=0.3)
@@ -631,11 +722,34 @@ if __name__ == "__main__":
         help="Which embedding mode to load (matches save_embeds.py)."
     )
     parser.add_argument(
+        "--subset",
+        type=str,
+        default="both",
+        choices=["both", "train", "val"],
+        help="Which subset to actually load: 'train', 'val', or 'both'.",
+    )
+    parser.add_argument(
+        "--split_index_path",
+        type=str,
+        default="",
+        help="Optional path to a JSON split index for deterministic splits. If it exists, it's used; if missing and --persist_split_index is set, it will be written.",
+    )
+    parser.add_argument(
+        "--persist_split_index",
+        action="store_true",
+        help="When set with --split_index_path (and file missing), write the computed split to disk for future reuse.",
+    )
+    parser.add_argument(
         "--keep_all_data",
         action="store_true",
         help="If set, do not subsample negatives (keep all data). Overrides max_neg_ratio.",
     )
-    
+    parser.add_argument(
+        "--train_ratio",
+        type=float,
+        default=0.8,
+        help="Train/val split ratio at the meta level.",
+    )
     args = parser.parse_args()
 
     train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders(
@@ -643,12 +757,16 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
-        max_neg_ratio=args.max_neg_ratio,
-        hard_neg_ratio=args.hard_neg_ratio if not args.keep_all_data else -1.0,
+        train_ratio=args.train_ratio,  # default single-dataset split; adjust if exposing via CLI
+        max_neg_ratio=args.max_neg_ratio if not args.keep_all_data else -1.0,
+        hard_neg_ratio=args.hard_neg_ratio,
         hard_neg_rel_thr=args.hard_neg_rel_thr,
         layer_mode=args.layer_mode,
         split_mode=args.split_mode,
         emb_mode=args.emb_mode,
+        subset=args.subset,
+        split_index_path= f"dataset/splits/multiview/multiview_{args.seed}_{args.train_ratio}.json",#args.split_index_path or None,
+        persist_split_index= True #args.persist_split_index,
     )
 
     print(f"[CHECK] Train dataset size: {len(train_ds)}")

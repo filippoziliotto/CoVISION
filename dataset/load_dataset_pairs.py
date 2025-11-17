@@ -2,6 +2,7 @@
 import os
 from typing import List, Dict, Tuple
 import random
+import json
 
 import numpy as np
 import torch
@@ -100,6 +101,105 @@ def _load_graphs_from_meta(meta_graphs: List[Dict]) -> List[Dict]:
             )
         )
     return graphs
+
+
+# -------------------------------------------------------
+# New: Meta-level split helpers for deterministic splits
+# -------------------------------------------------------
+def _split_meta_graphs(
+    meta_graphs: List[Dict],
+    seed: int,
+    train_ratio: float,
+    split_mode: str,
+) -> Tuple[List[Dict], List[Dict], List[str], set, set]:
+    """
+    Split *meta* graphs (without loading arrays) into train/val according to split_mode and train_ratio.
+
+    Returns:
+        train_meta, val_meta, base_scenes, train_scenes, val_scenes
+    """
+    if not meta_graphs:
+        return [], [], [], set(), set()
+
+    # compute base_scene from scene_version (e.g., "Adrian-3" -> "Adrian")
+    for m in meta_graphs:
+        if "base_scene" not in m:
+            m["base_scene"] = m["scene_version"].split("-")[0]
+
+    base_scenes = sorted({m["base_scene"] for m in meta_graphs})
+
+    if split_mode == "scene_disjoint":
+        scenes_shuffled = sk_shuffle(base_scenes, random_state=seed)
+        n_train = int(len(base_scenes) * train_ratio)
+        train_scenes = set(scenes_shuffled[:n_train])
+        val_scenes = set(scenes_shuffled[n_train:])
+        train_meta = [m for m in meta_graphs if m["base_scene"] in train_scenes]
+        val_meta = [m for m in meta_graphs if m["base_scene"] in val_scenes]
+
+    elif split_mode == "version_disjoint":
+        scene_versions = sorted({m["scene_version"] for m in meta_graphs})
+        scene_versions_shuffled = sk_shuffle(scene_versions, random_state=seed)
+        n_train = int(len(scene_versions) * train_ratio)
+        train_versions = set(scene_versions_shuffled[:n_train])
+        val_versions = set(scene_versions_shuffled[n_train:])
+        train_meta = [m for m in meta_graphs if m["scene_version"] in train_versions]
+        val_meta = [m for m in meta_graphs if m["scene_version"] in val_versions]
+        train_scenes = {m["base_scene"] for m in train_meta}
+        val_scenes = {m["base_scene"] for m in val_meta}
+
+    elif split_mode == "graph":
+        all_idx = list(range(len(meta_graphs)))
+        all_idx = sk_shuffle(all_idx, random_state=seed)
+        n_train_graphs = int(len(all_idx) * train_ratio)
+        train_idx = set(all_idx[:n_train_graphs])
+        val_idx = set(all_idx[n_train_graphs:])
+        train_meta = [meta_graphs[i] for i in all_idx if i in train_idx]
+        val_meta = [meta_graphs[i] for i in all_idx if i in val_idx]
+        train_scenes = {m["base_scene"] for m in train_meta}
+        val_scenes = {m["base_scene"] for m in val_meta}
+    else:
+        raise ValueError(
+            f"Invalid split_mode '{split_mode}'. "
+            f"Valid: 'scene_disjoint', 'version_disjoint', 'graph'."
+        )
+
+    return train_meta, val_meta, base_scenes, train_scenes, val_scenes
+
+
+def _load_split_index_pairs(path: str) -> Dict:
+    with open(path, "r") as f:
+        js = json.load(f)
+    if "train" not in js or "val" not in js:
+        raise ValueError(f"Split index at {path} missing 'train'/'val' keys.")
+    return js
+
+
+def _write_split_index_pairs(
+    path: str,
+    train_meta: List[Dict],
+    val_meta: List[Dict],
+    *,
+    seed: int,
+    train_ratio: float,
+    split_mode: str,
+    dataset_type: str,
+    emb_mode: str,
+) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "info": {
+            "seed": seed,
+            "train_ratio": train_ratio,
+            "split_mode": split_mode,
+            "dataset_type": dataset_type,
+            "emb_mode": emb_mode,
+            "source": "load_dataset_pairs.py",
+        },
+        "train": [{"scene_version": m["scene_version"], "split_id": m["split_id"]} for m in train_meta],
+        "val": [{"scene_version": m["scene_version"], "split_id": m["split_id"]} for m in val_meta],
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
 
 
 def _split_graphs(
@@ -368,10 +468,17 @@ def build_dataloaders_pairs(
     layer_mode: str = "1st_last",
     split_mode: str = "scene_disjoint",
     emb_mode: str = "avg",
+    subset: str = "both",                   # new: 'train' | 'val' | 'both'
+    split_index_path: str = None,           # new: optional path to load/save deterministic split
+    persist_split_index: bool = False,      # new: if True and split_index_path is set, write it when missing
 ) -> Tuple[DataLoader, DataLoader, Dataset, Dataset, Dict]:
     """
     Build dataloaders directly from pair-level embeddings for a single dataset
     (either Gibson or HM3D), splitting that dataset into train/val.
+
+    Important change: we now split at the *meta* level and then only load the
+    requested subset(s), so heavy arrays for the unused split are never loaded.
+    Deterministic splits can be persisted/loaded via split_index_path.
     """
     if dataset_type == "hm3d":
         pred_root = "data/predictions_feat/hvgg"
@@ -381,22 +488,50 @@ def build_dataloaders_pairs(
     random.seed(seed)
     np.random.seed(seed)
 
-    # 1) Discover all pair graphs for this dataset
+    # 1) Discover all pair graphs (meta only)
     meta_graphs = _discover_pair_graphs(emb_mode=emb_mode, pred_root=pred_root)
-
-    # 2) Load each pairs.npz into memory
-    graphs = _load_graphs_from_meta(meta_graphs)
-
-    if not graphs:
+    if not meta_graphs:
         raise RuntimeError(f"No valid pair graphs found in predictions_feat for dataset_type='{dataset_type}'.")
 
-    # 3) Split strategy (scene_disjoint / version_disjoint / graph)
-    train_graphs, val_graphs, base_scenes, train_scenes, val_scenes = _split_graphs(
-        graphs,
-        seed=seed,
-        train_ratio=train_ratio,
-        split_mode=split_mode,
-    )
+    # 2) Determine train/val meta-splits deterministically
+    if split_index_path and os.path.isfile(split_index_path):
+        js = _load_split_index_pairs(split_index_path)
+        train_keys = {(d["scene_version"], str(d["split_id"])) for d in js["train"]}
+        val_keys = {(d["scene_version"], str(d["split_id"])) for d in js["val"]}
+        train_meta = [m for m in meta_graphs if (m["scene_version"], m["split_id"]) in train_keys]
+        val_meta = [m for m in meta_graphs if (m["scene_version"], m["split_id"]) in val_keys]
+        # Compute sets for reporting
+        for m in meta_graphs:
+            if "base_scene" not in m:
+                m["base_scene"] = m["scene_version"].split("-")[0]
+        base_scenes = sorted({m["base_scene"] for m in meta_graphs})
+        train_scenes = {m["base_scene"] for m in train_meta}
+        val_scenes = {m["base_scene"] for m in val_meta}
+    else:
+        train_meta, val_meta, base_scenes, train_scenes, val_scenes = _split_meta_graphs(
+            meta_graphs,
+            seed=seed,
+            train_ratio=train_ratio,
+            split_mode=split_mode,
+        )
+        if split_index_path and persist_split_index:
+            _write_split_index_pairs(
+                split_index_path,
+                train_meta,
+                val_meta,
+                seed=seed,
+                train_ratio=train_ratio,
+                split_mode=split_mode,
+                dataset_type=dataset_type,
+                emb_mode=emb_mode,
+            )
+
+    # 3) Load only the requested subsets
+    if subset not in {"both", "train", "val"}:
+        raise ValueError("subset must be one of {'both','train','val'}")
+
+    train_graphs = _load_graphs_from_meta(train_meta) if subset in {"both", "train"} else []
+    val_graphs = _load_graphs_from_meta(val_meta)     if subset in {"both", "val"} else []
 
     # 4) Build datasets
     train_ds = EdgePairDatasetPairs(
@@ -430,11 +565,19 @@ def build_dataloaders_pairs(
         drop_last=False,
     )
 
-    emb_dim = graphs[0]["emb_i"].shape[-1]
+    # Embedding dim from any available side
+    emb_dim = None
+    if train_graphs:
+        emb_dim = train_graphs[0]["emb_i"].shape[-1]
+    elif val_graphs:
+        emb_dim = val_graphs[0]["emb_i"].shape[-1]
+    else:
+        emb_dim = -1
+
     meta = dict(
-        num_graphs=len(graphs),
-        num_train_graphs=len(train_graphs),
-        num_val_graphs=len(val_graphs),
+        num_graphs=len(meta_graphs),
+        num_train_graphs=len(train_meta),
+        num_val_graphs=len(val_meta),
         num_scenes=len(base_scenes),
         num_train_scenes=len(train_scenes),
         num_val_scenes=len(val_scenes),
@@ -442,11 +585,13 @@ def build_dataloaders_pairs(
         split_mode=split_mode,
         dataset_type=dataset_type,
         emb_mode=emb_mode,
+        subset=subset,
+        split_index_path=split_index_path or "",
     )
 
     print(
         f"[INFO] Pair graphs: total={meta['num_graphs']}, "
-        f"train={meta['num_train_graphs']}, val={meta['num_val_graphs']}"
+        f"train_meta={meta['num_train_graphs']}, val_meta={meta['num_val_graphs']}"
     )
     print(
         f"[INFO] Scenes: total={meta['num_scenes']}, "
@@ -645,6 +790,24 @@ if __name__ == "__main__":
         help="Dataset type / source of pair embeddings: 'gibson' or 'hm3d'.",
     )
     parser.add_argument(
+        "--subset",
+        type=str,
+        default="both",
+        choices=["both", "train", "val"],
+        help="Which subset to actually load: 'train', 'val', or 'both'.",
+    )
+    parser.add_argument(
+        "--split_index_path",
+        type=str,
+        default="",
+        help="Optional path to a JSON split index for deterministic splits. If it exists, it's used; if missing and --persist_split_index is set, it will be written.",
+    )
+    parser.add_argument(
+        "--persist_split_index",
+        action="store_true",
+        help="When set with --split_index_path (and file missing), write the computed split to disk for future reuse.",
+    )
+    parser.add_argument(
         "--keep_all_data",
         action="store_true",
         help="If set, do not subsample negatives (keep all data). Overrides max_neg_ratio.",
@@ -656,12 +819,16 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
+        train_ratio=0.8,  # default for single-dataset builder; can be exposed if needed
         max_neg_ratio=args.max_neg_ratio if not args.keep_all_data else -1.0,
         hard_neg_ratio=args.hard_neg_ratio,
         hard_neg_rel_thr=args.hard_neg_rel_thr,
         layer_mode=args.layer_mode,
         split_mode=args.split_mode,
         emb_mode=args.emb_mode,
+        subset=args.subset,
+        split_index_path=args.split_index_path or None,
+        persist_split_index=args.persist_split_index,
     )
 
     print(f"[CHECK] Train dataset size: {len(train_ds)}")

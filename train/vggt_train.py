@@ -434,6 +434,12 @@ def zero_shot_eval(
         iou_thresholds=thresholds_arr,
         iou_curve=ious_arr,
     )
+    
+def _default_multiview_split_path(seed: int, dataset_type: str) -> str:
+    ratio = 0.8 if dataset_type == "gibson" else 0.9
+    split_dir = os.path.join("dataset", "splits", "multiview")
+    os.makedirs(split_dir, exist_ok=True)
+    return os.path.join(split_dir, f"multiview_{seed}_{ratio}.json")
 
 # ---------------------------------------------------------------------
 # Main script
@@ -618,6 +624,10 @@ def main():
         choices=["edge", "gated"],
         help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
     )
+    parser.add_argument("--split_index_path", type=str, default=None,
+                        help="Optional path to a persisted meta-level split index (.json).")
+    parser.add_argument("--persist_split_index", action="store_true",
+                        help="If set (and a split path is given/derived), write the split file if missing.")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -690,19 +700,26 @@ def main():
             print(f"[WARN] Failed to initialize wandb ({e}). Disabling wandb logging.")
             use_wandb = False
 
+    # Use the paper’s defaults for the *actual* split unless you explicitly want otherwise
+    effective_train_ratio = 0.8 if args.dataset_type == "gibson" else 0.9
+    split_path = args.split_index_path or _default_multiview_split_path(args.seed, args.dataset_type)
+
     # Build dataloaders
     train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders(
         dataset_type=args.dataset_type,
         batch_size=args.batch_size,
-        seed=args.seed,
         num_workers=4,
-        train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
-        max_neg_ratio=args.max_neg_ratio,
-        hard_neg_ratio=args.hard_neg_ratio if not args.keep_all_data else -1.0,
+        train_ratio=effective_train_ratio,
+        seed=args.seed,
+        max_neg_ratio=(args.max_neg_ratio if not args.keep_all_data else -1.0),
+        hard_neg_ratio=args.hard_neg_ratio,
         hard_neg_rel_thr=0.3,
         layer_mode=args.layer_mode,
         split_mode=args.data_split_mode,
         emb_mode=args.emb_mode,
+        subset="both",
+        split_index_path=split_path,
+        persist_split_index=args.persist_split_index,
     )
 
     print(
