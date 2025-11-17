@@ -5,7 +5,6 @@ from tqdm import tqdm
 
 # Add the main folder to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import argparse
 import random
 import warnings
 
@@ -20,14 +19,20 @@ from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
 )
-import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------
 # Dataset import: load_dataset_pairs.py
 # ---------------------------------------------------------------------
 from dataset.load_dataset_pairs import build_dataloaders_pairs
-from utils.utils import set_seed, pairwise_ranking_loss
+from utils.utils import (
+    set_seed,
+    pairwise_ranking_loss,
+    focal_bce_with_logits,
+    plot_iou_curves,
+    plot_training_history,
+)
 from models.PairView import EdgeClassifier, GatedLayerFusion, AttentiveLayerFusion
+from train.args import build_pairview_parser
 
 warnings.filterwarnings("ignore")
 
@@ -48,6 +53,9 @@ def train_epoch(
     reg_lambda: float = 1.0,
     use_iou_loss: bool = False,
     iou_lambda: float = 0.3,
+    use_focal_loss: bool = False,
+    focal_alpha: float = 0.25,
+    focal_gamma: float = 2.0,
     use_rank_loss: bool = False,
     rank_lambda: float = 0.1,
     rank_margin: float = 0.1,
@@ -85,7 +93,12 @@ def train_epoch(
         preds = out["logits"] if isinstance(out, dict) else out  # (B,)
 
         # Main BCE loss
-        loss_bce = criterion(preds, labels)
+        if use_focal_loss:
+            loss_bce = focal_bce_with_logits(
+                preds, labels, alpha=focal_alpha, gamma=focal_gamma
+            )
+        else:
+            loss_bce = criterion(preds, labels)
 
         # Optional regression loss on strengths
         if use_reg_loss:
@@ -165,6 +178,9 @@ def eval_epoch(
     use_reg_loss: bool = False,
     reg_lambda: float = 1.0,
     use_iou_loss: bool = False,
+    use_focal_loss: bool = False,
+    focal_alpha: float = 0.25,
+    focal_gamma: float = 2.0,
 ):
     classifier.eval()
     criterion = nn.BCEWithLogitsLoss()
@@ -216,7 +232,12 @@ def eval_epoch(
     labels_all = torch.cat(all_labels, dim=0)
     strengths_all = torch.cat(all_strengths, dim=0)
 
-    loss_bce = criterion(logits_all, labels_all)
+    if use_focal_loss:
+        loss_bce = focal_bce_with_logits(
+            logits_all, labels_all, alpha=focal_alpha, gamma=focal_gamma
+        )
+    else:
+        loss_bce = criterion(logits_all, labels_all)
     if use_reg_loss:
         probs_all_t = torch.sigmoid(logits_all)
         loss_reg = F.mse_loss(probs_all_t, strengths_all)
@@ -428,181 +449,7 @@ def _default_pairview_split_path(seed: int, dataset_type: str) -> str:
 # Main script
 # ---------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(
-        description="Train EdgeClassifier on pair-level VGGT embeddings (pairs.npz)"
-    )
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument(
-        "--optimizer",
-        type=str,
-        default="adamw",
-        choices=["adam", "adamw"],
-    )
-    parser.add_argument(
-        "--weight_decay",
-        type=float,
-        default=5e-5,
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=32,
-    )
-    parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--device", type=str, default="mps")
-    parser.add_argument("--out_dir", type=str, default="train/classifier_pairs")
-    parser.add_argument(
-        "--max_grad_norm",
-        type=float,
-        default=0.0,
-    )
-    # Wandb
-    parser.add_argument("--wandb_project", type=str, default="Co-Vision")
-    parser.add_argument("--wandb_run_name", type=str, default=None)
-    parser.add_argument(
-        "--wandb_off",
-        action="store_true",
-    )
-    # Early stopping + LR scheduler
-    parser.add_argument(
-        "--es_patience",
-        type=int,
-        default=5,
-    )
-    parser.add_argument(
-        "--es_min_delta",
-        type=float,
-        default=1e-4,
-    )
-    parser.add_argument(
-        "--lr_factor",
-        type=float,
-        default=0.5,
-    )
-    parser.add_argument(
-        "--lr_patience",
-        type=int,
-        default=3,
-    )
-    parser.add_argument(
-        "--zero_shot",
-        action="store_true",
-        help="If set, run zero-shot eval (cosine similarity) only.",
-    )
-    parser.add_argument(
-        "--aug_swap_prob",
-        type=float,
-        default=0.5,
-    )
-    parser.add_argument(
-        "--use_reg_loss",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--reg_lambda",
-        type=float,
-        default=0.3,
-    )
-    parser.add_argument(
-        "--use_rank_loss",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--rank_lambda",
-        type=float,
-        default=0.1,
-    )
-    parser.add_argument(
-        "--rank_margin",
-        type=float,
-        default=0.1,
-    )
-    parser.add_argument(
-        "--rank_num_samples",
-        type=int,
-        default=1024,
-    )
-    parser.add_argument(
-        "--layer_mode",
-        type=str,
-        default="1st_last",
-        choices=["all", "1st_last", "2nd_last", "3rd_last", "4th_last"],
-    )
-    parser.add_argument(
-        "--data_split_mode",
-        type=str,
-        default="scene_disjoint",
-        choices=["scene_disjoint", "version_disjoint", "graph"],
-    )
-    parser.add_argument(
-        "--use_iou_loss",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--iou_lambda",
-        type=float,
-        default=0.3,
-    )
-    parser.add_argument(
-        "--dataset_type",
-        type=str,
-        default="gibson",
-        choices=["hm3d", "gibson"],
-        help="Dataset type / source of pair embeddings: 'gibson' or 'hm3d'.",
-    )
-    parser.add_argument(
-        "--emb_mode",
-            type=str,
-            default="avg",
-            choices=["avg", "avg_max", "chunked"],
-            help="Embedding aggregation mode.",
-    )
-    parser.add_argument(
-        "--keep_all_data",
-        action="store_true",
-        help="If set, do not subsample negatives (keep all data). Overrides max_neg_ratio.",
-    )
-    parser.add_argument(
-        "--hard_neg_ratio",
-        type=float,
-        default=0.5,
-        help="Fraction of sampled negatives that are hard.",
-    )
-    parser.add_argument(
-        "--max_neg_ratio",
-        type=float,
-        default=1.0,
-        help="Maximum number of negatives to keep per positive (ratio). Use <=0 to keep all negatives.",
-    )
-    parser.add_argument(
-        "--eval_dataset_type",
-        type=str,
-        default=None,
-        choices=["hm3d", "gibson"],
-        help=(
-            "If set (and different from --dataset_type), train on --dataset_type "
-            "and evaluate on this dataset type using a held-out split."
-        ),
-    )
-    parser.add_argument(
-        "--head_type",
-        type=str,
-        default="edge",
-        choices=["edge", "gated"],
-        help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
-    )
-    parser.add_argument(
-        "--hidden_dim",
-        type=int,
-        default=256,
-        help="Hidden dimension for EdgeClassifier MLP.",
-    )
-    parser.add_argument("--split_index_path", type=str, default=None,
-                        help="Optional path to a persisted meta-level split index (.json).")
-    parser.add_argument("--persist_split_index", action="store_true",
-                        help="If set (and a split path is given/derived), write the split file if missing.")
-
+    parser = build_pairview_parser()
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -755,18 +602,14 @@ def main():
         thr_val = val_metrics.get("iou_thresholds", None)
         iou_val = val_metrics.get("iou_curve", None)
 
-        if thr_train is not None and iou_train is not None and thr_val is not None and iou_val is not None:
-            x_thr = thr_val if thr_val.shape == thr_train.shape else thr_val
-            plt.figure(figsize=(6, 4))
-            plt.plot(x_thr, iou_train, label="train")
-            plt.plot(x_thr, iou_val, label="val")
-            plt.xlabel("Threshold")
-            plt.ylabel("Graph IoU")
-            plt.title("Zero-shot Graph IoU vs Threshold")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(zs_plots_dir, "zero_shot_iou_curve.png"), dpi=200)
-            plt.close()
+        plot_iou_curves(
+            thr_train,
+            iou_train,
+            thr_val,
+            iou_val,
+            out_path=os.path.join(zs_plots_dir, "zero_shot_iou_curve.png"),
+            title="Zero-shot Graph IoU vs Threshold",
+        )
 
         if use_wandb:
             wandb.log(
@@ -881,6 +724,9 @@ def main():
             reg_lambda=args.reg_lambda,
             use_iou_loss=args.use_iou_loss,
             iou_lambda=args.iou_lambda,
+            use_focal_loss=args.use_focal_loss,
+            focal_alpha=args.focal_alpha,
+            focal_gamma=args.focal_gamma,
             use_rank_loss=args.use_rank_loss,
             rank_lambda=args.rank_lambda,
             rank_margin=args.rank_margin,
@@ -893,6 +739,9 @@ def main():
             use_reg_loss=args.use_reg_loss,
             reg_lambda=args.reg_lambda,
             use_iou_loss=args.use_iou_loss,
+            use_focal_loss=args.use_focal_loss,
+            focal_alpha=args.focal_alpha,
+            focal_gamma=args.focal_gamma,
         )
         val_metrics = eval_epoch(
             classifier,
@@ -901,6 +750,9 @@ def main():
             use_reg_loss=args.use_reg_loss,
             reg_lambda=args.reg_lambda,
             use_iou_loss=args.use_iou_loss,
+            use_focal_loss=args.use_focal_loss,
+            focal_alpha=args.focal_alpha,
+            focal_gamma=args.focal_gamma,
         )
 
         print(
@@ -982,19 +834,15 @@ def main():
 
         if thr_train is not None and iou_train is not None and thr_val is not None and iou_val is not None:
             plots_dir = os.path.join(args.out_dir, "plots")
-            os.makedirs(plots_dir, exist_ok=True)
-            x_thr = thr_val if thr_val.shape == thr_train.shape else thr_val
-            plt.figure(figsize=(6, 4))
-            plt.plot(x_thr, iou_train, label="train")
-            plt.plot(x_thr, iou_val, label="val")
-            plt.xlabel("Threshold")
-            plt.ylabel("Graph IoU")
-            plt.title(f"Graph IoU vs Threshold (Epoch {epoch:03d})")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(plots_dir, f"iou_curve_epoch_{epoch:03d}.png"), dpi=200)
-            plt.savefig(os.path.join(plots_dir, "iou_curve_latest.png"), dpi=200)
-            plt.close()
+            plot_iou_curves(
+                thr_train,
+                iou_train,
+                thr_val,
+                iou_val,
+                out_path=os.path.join(plots_dir, f"iou_curve_epoch_{epoch:03d}.png"),
+                title=f"Graph IoU vs Threshold (Epoch {epoch:03d})",
+                latest_path=os.path.join(plots_dir, "iou_curve_latest.png"),
+            )
 
         if epochs_no_improve >= args.es_patience:
             print(
@@ -1005,93 +853,7 @@ def main():
 
     # Final plots
     plots_dir = os.path.join(args.out_dir, "plots")
-    os.makedirs(plots_dir, exist_ok=True)
-
-    num_epochs = len(history["train_loss"])
-    if num_epochs > 0:
-        epochs = np.arange(1, num_epochs + 1)
-
-        # Loss
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["train_loss"], label="train")
-        plt.plot(epochs, history["val_loss"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("Loss")
-        plt.title("Train/Val Loss")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "loss.png"), dpi=200)
-        plt.close()
-
-        # Accuracy
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["train_acc"], label="train")
-        plt.plot(epochs, history["val_acc"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("Accuracy")
-        plt.title("Train/Val Accuracy")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "accuracy.png"), dpi=200)
-        plt.close()
-
-        # F1
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["train_f1"], label="train")
-        plt.plot(epochs, history["val_f1"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("F1-score")
-        plt.title("Train/Val F1")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "f1.png"), dpi=200)
-        plt.close()
-
-        # ROC AUC
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["val_roc_auc"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("ROC AUC")
-        plt.title("Validation ROC AUC")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "roc_auc.png"), dpi=200)
-        plt.close()
-
-        # Graph IoU best
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["val_graph_iou_best"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("Graph IoU (best)")
-        plt.title("Validation Graph IoU (best)")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "graph_iou_best.png"), dpi=200)
-        plt.close()
-
-        # Graph IoU AUC
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["val_graph_iou_auc"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("Graph IoU AUC")
-        plt.title("Validation Graph IoU AUC")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "graph_iou_auc.png"), dpi=200)
-        plt.close()
-
-        # Soft IoU
-        if len(history["train_soft_iou"]) > 0 and len(history["val_soft_iou"]) > 0:
-            plt.figure(figsize=(6, 4))
-            plt.plot(epochs, history["train_soft_iou"], label="train")
-            plt.plot(epochs, history["val_soft_iou"], label="val")
-            plt.xlabel("Epoch")
-            plt.ylabel("Soft IoU")
-            plt.title("Train/Val Soft IoU")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(plots_dir, "soft_iou.png"), dpi=200)
-            plt.close()
+    plot_training_history(history, plots_dir)
 
     # Save classifier
     clf_path = os.path.join(args.out_dir, "edge_classifier_pairs.pth")

@@ -5,7 +5,6 @@ from tqdm import tqdm
 
 # Add the main folder to the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import argparse
 import random
 import warnings
 
@@ -20,14 +19,20 @@ from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
 )
-import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------
 # Dataset import: load_dataset.py
 # ---------------------------------------------------------------------
 from dataset.load_dataset import build_dataloaders
 from models.MultiView import EdgeClassifier, GatedLayerFusion
-from utils.utils import set_seed, pairwise_ranking_loss
+from utils.utils import (
+    set_seed,
+    pairwise_ranking_loss,
+    focal_bce_with_logits,
+    plot_iou_curves,
+    plot_training_history,
+)
+from train.args import build_multiview_parser
 
 warnings.filterwarnings("ignore")
 
@@ -46,6 +51,9 @@ def train_epoch(
     reg_lambda: float = 1.0,
     use_iou_loss: bool = False,
     iou_lambda: float = 0.3,
+    use_focal_loss: bool = False,
+    focal_alpha: float = 0.25,
+    focal_gamma: float = 2.0,
     use_rank_loss: bool = False,
     rank_lambda: float = 0.1,
     rank_margin: float = 0.1,
@@ -83,7 +91,12 @@ def train_epoch(
         preds = out["logits"] if isinstance(out, dict) else out  # (B,)
 
         # Main BCE loss on binary labels
-        loss_bce = criterion(preds, labels)
+        if use_focal_loss:
+            loss_bce = focal_bce_with_logits(
+                preds, labels, alpha=focal_alpha, gamma=focal_gamma
+            )
+        else:
+            loss_bce = criterion(preds, labels)
 
         # Optional regression loss on continuous strengths from rel_mat
         if use_reg_loss:
@@ -166,6 +179,9 @@ def eval_epoch(
     use_reg_loss: bool = False,
     reg_lambda: float = 1.0,
     use_iou_loss: bool = False,
+    use_focal_loss: bool = False,
+    focal_alpha: float = 0.25,
+    focal_gamma: float = 2.0,
 ):
     """Evaluate classifier on validation loader.
 
@@ -222,7 +238,12 @@ def eval_epoch(
     strengths_all = torch.cat(all_strengths, dim=0)  # (N,)
 
     # Main BCE loss
-    loss_bce = criterion(logits_all, labels_all)
+    if use_focal_loss:
+        loss_bce = focal_bce_with_logits(
+            logits_all, labels_all, alpha=focal_alpha, gamma=focal_gamma
+        )
+    else:
+        loss_bce = criterion(logits_all, labels_all)
 
     # Optional regression loss
     if use_reg_loss:
@@ -447,225 +468,8 @@ def _default_multiview_split_path(seed: int, dataset_type: str) -> str:
 # Main script
 # ---------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(
-        description="Train EdgeClassifier on precomputed embeddings/adjacency (CoVisGraphDataset)"
-    )
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument(
-        "--optimizer",
-        type=str,
-        default="adamw",
-        choices=["adam", "adamw"],
-        help="Optimizer type.",
-    )
-    parser.add_argument(
-        "--hidden_dim",
-        type=int,
-        default=256,
-        help="Hidden dimension for EdgeClassifier MLP.",
-    )
-    parser.add_argument(
-        "--weight_decay",
-        type=float,
-        default=5e-5,
-        help="Weight decay (L2 regularization).",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=32,
-        help="Batch size (number of graphs per batch).",
-    )
-    parser.add_argument(
-        "--max_neg_ratio",
-        type=float,
-        default=1.0,
-        help="Max negative:positive ratio for edge pairs.",
-    )
-    parser.add_argument("--hard_neg_ratio", type=float, default=0.5)
-
-    parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--device", type=str, default="mps")
-    parser.add_argument("--out_dir", type=str, default="train/classifier")
-    parser.add_argument(
-        "--max_grad_norm",
-        type=float,
-        default=0.0,
-        help="Max gradient norm for clipping (0.0 disables clipping).",
-    )
-    # Wandb
-    parser.add_argument("--wandb_project", type=str, default="Co-Vision")
-    parser.add_argument("--wandb_run_name", type=str, default=None)
-    parser.add_argument(
-        "--wandb_off",
-        action="store_true",
-        help="Disable wandb logging",
-    )
-    # Early stopping + LR scheduler
-    parser.add_argument(
-        "--es_patience",
-        type=int,
-        default=5,
-        help="Early stopping patience (epochs without Graph IoU AUC improvement).",
-    )
-    parser.add_argument(
-        "--es_min_delta",
-        type=float,
-        default=1e-4,
-        help="Minimum improvement in val Graph IoU AUC to reset early stopping.",
-    )
-    parser.add_argument(
-        "--lr_factor",
-        type=float,
-        default=0.5,
-        help="Factor to reduce LR on plateau (ReduceLROnPlateau).",
-    )
-    parser.add_argument(
-        "--lr_patience",
-        type=int,
-        default=3,
-        help="LR scheduler patience in epochs (ReduceLROnPlateau).",
-    )
-    parser.add_argument(
-        "--zero_shot",
-        action="store_true",
-        help="If set, run zero-shot evaluation using cosine similarity only (no training).",
-    )
-    parser.add_argument(
-        "--aug_swap_prob",
-        type=float,
-        default=0.5,
-        help="Probability of swapping node pairs as data augmentation during training.",
-    )
-    parser.add_argument(
-        "--use_reg_loss",
-        action="store_true",
-        help="If set, add auxiliary regression loss to continuous edge strengths (rel_mat).",
-    )
-    parser.add_argument(
-        "--reg_lambda",
-        type=float,
-        default=0.3,
-        help="Weight for the regression loss term.",
-    )
-    parser.add_argument(
-        "--use_rank_loss",
-        action="store_true",
-        help="If set, add a pairwise ranking loss based on continuous edge strengths.",
-    )
-    parser.add_argument(
-        "--rank_lambda",
-        type=float,
-        default=0.1,
-        help="Weight for the ranking loss term.",
-    )
-    parser.add_argument(
-        "--rank_margin",
-        type=float,
-        default=0.1,
-        help="Margin for the ranking loss on score differences.",
-    )
-    parser.add_argument(
-        "--rank_num_samples",
-        type=int,
-        default=1024,
-        help="Number of pairwise constraints sampled per batch for ranking loss.",
-    )
-    parser.add_argument(
-        "--layer_mode",
-        type=str,
-        default="1st_last",
-        choices=["all", "1st_last", "2nd_last", "3rd_last", "4th_last"],
-        help="Which VGGT layer(s) to use: 'all' or one of the last-k layers.",
-    )
-    parser.add_argument(
-        "--data_split_mode",
-        type=str,
-        default="scene_disjoint",
-        choices=["scene_disjoint", "version_disjoint", "graph"],
-        help="Split mode: 'scene_disjoint' (default), 'version_disjoint', or 'graph'."
-    )
-    parser.add_argument(
-        "--use_iou_loss",
-        action="store_true",
-        help="If set, add a batch-level soft IoU loss term."
-    )
-    parser.add_argument(
-        "--iou_lambda",
-        type=float,
-        default=0.3,
-        help="Weight for the soft IoU loss term."
-    )
-    parser.add_argument(
-        "--train_ratio", type=float, default=0.8, help="Train/val split ratio."
-    )
-    parser.add_argument(
-        "--dataset_type",
-        type=str,
-        default="gibson",
-        choices=["hm3d", "gibson"],
-        help="Dataset type / source of embeddings: 'gibson' or 'hm3d'."
-    )
-    parser.add_argument(
-        "--emb_mode",
-        type=str,
-        default="avg_max",
-        choices=["avg", "avg_max", "chunked"],
-        help="Which embedding mode to load (used to pick all_embeds_{emb_mode}.npz).",
-    )
-    parser.add_argument(
-        "--keep_all_data",
-        action="store_true",
-        help="If set, do not subsample negatives (keep all data). Overrides max_neg_ratio.",
-    )
-    parser.add_argument(
-        "--head_type",
-        type=str,
-        default="edge",
-        choices=["edge", "gated"],
-        help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
-    )
-    parser.add_argument("--split_index_path", type=str, default=None,
-                        help="Optional path to a persisted meta-level split index (.json).")
-    parser.add_argument("--persist_split_index", action="store_true",
-                        help="If set (and a split path is given/derived), write the split file if missing.")
+    parser = build_multiview_parser()
     args = parser.parse_args()
-
-    set_seed(args.seed)
-
-    # Device
-    device = args.device if args.device is not None else (
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
-    os.makedirs(args.out_dir, exist_ok=True)
-    print(f"[INFO] Using device: {device}")
-
-    # Wandb (optional)
-    try:
-        import wandb
-        _wandb_available = hasattr(wandb, "init")
-        if not _wandb_available:
-            print("[WARN] wandb imported but has no 'init' attribute. Disabling wandb logging.")
-    except ImportError:
-        wandb = None  # type: ignore
-        _wandb_available = False
-
-    use_wandb = (
-        (not args.wandb_off)
-        and _wandb_available
-        and (args.wandb_project is not None)
-    )
-    if use_wandb:
-        try:
-            wandb.init(
-                project=args.wandb_project,
-                name=args.wandb_run_name,
-                config=vars(args),
-            )
-        except Exception as e:
-            print(f"[WARN] Failed to initialize wandb ({e}). Disabling wandb logging.")
-            use_wandb = False
 
     set_seed(args.seed)
 
@@ -774,19 +578,14 @@ def main():
         thr_val = val_metrics.get("iou_thresholds", None)
         iou_val = val_metrics.get("iou_curve", None)
 
-        if thr_train is not None and iou_train is not None and thr_val is not None and iou_val is not None:
-            # Use validation thresholds for x-axis if both are the same length
-            x_thr = thr_val if thr_val.shape == thr_train.shape else thr_val
-            plt.figure(figsize=(6, 4))
-            plt.plot(x_thr, iou_train, label="train")
-            plt.plot(x_thr, iou_val, label="val")
-            plt.xlabel("Threshold")
-            plt.ylabel("Graph IoU")
-            plt.title("Zero-shot Graph IoU vs Threshold")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(zs_plots_dir, "zero_shot_iou_curve.png"), dpi=200)
-            plt.close()
+        plot_iou_curves(
+            thr_train,
+            iou_train,
+            thr_val,
+            iou_val,
+            out_path=os.path.join(zs_plots_dir, "zero_shot_iou_curve.png"),
+            title="Zero-shot Graph IoU vs Threshold",
+        )
 
         if use_wandb:
             import wandb as _wandb_mod
@@ -899,6 +698,9 @@ def main():
             reg_lambda=args.reg_lambda,
             use_iou_loss=args.use_iou_loss,
             iou_lambda=args.iou_lambda,
+            use_focal_loss=args.use_focal_loss,
+            focal_alpha=args.focal_alpha,
+            focal_gamma=args.focal_gamma,
             use_rank_loss=args.use_rank_loss,
             rank_lambda=args.rank_lambda,
             rank_margin=args.rank_margin,
@@ -912,6 +714,9 @@ def main():
             use_reg_loss=args.use_reg_loss,
             reg_lambda=args.reg_lambda,
             use_iou_loss=args.use_iou_loss,
+            use_focal_loss=args.use_focal_loss,
+            focal_alpha=args.focal_alpha,
+            focal_gamma=args.focal_gamma,
         )
         val_metrics = eval_epoch(
             classifier,
@@ -920,6 +725,9 @@ def main():
             use_reg_loss=args.use_reg_loss,
             reg_lambda=args.reg_lambda,
             use_iou_loss=args.use_iou_loss,
+            use_focal_loss=args.use_focal_loss,
+            focal_alpha=args.focal_alpha,
+            focal_gamma=args.focal_gamma,
         )
 
         print(
@@ -1005,21 +813,15 @@ def main():
 
         if thr_train is not None and iou_train is not None and thr_val is not None and iou_val is not None:
             plots_dir = os.path.join(args.out_dir, "plots")
-            os.makedirs(plots_dir, exist_ok=True)
-            # Use validation thresholds for x-axis if shapes match, otherwise use validation's
-            x_thr = thr_val if thr_val.shape == thr_train.shape else thr_val
-            plt.figure(figsize=(6, 4))
-            plt.plot(x_thr, iou_train, label="train")
-            plt.plot(x_thr, iou_val, label="val")
-            plt.xlabel("Threshold")
-            plt.ylabel("Graph IoU")
-            plt.title(f"Graph IoU vs Threshold (Epoch {epoch:03d})")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(plots_dir, f"iou_curve_epoch_{epoch:03d}.png"), dpi=200)
-            # Also overwrite a 'latest' curve for convenience
-            plt.savefig(os.path.join(plots_dir, "iou_curve_latest.png"), dpi=200)
-            plt.close()
+            plot_iou_curves(
+                thr_train,
+                iou_train,
+                thr_val,
+                iou_val,
+                out_path=os.path.join(plots_dir, f"iou_curve_epoch_{epoch:03d}.png"),
+                title=f"Graph IoU vs Threshold (Epoch {epoch:03d})",
+                latest_path=os.path.join(plots_dir, "iou_curve_latest.png"),
+            )
 
         # Early stopping check
         if epochs_no_improve >= args.es_patience:
@@ -1029,97 +831,8 @@ def main():
             )
             break
 
-    # Save plots of metrics
     plots_dir = os.path.join(args.out_dir, "plots")
-    os.makedirs(plots_dir, exist_ok=True)
-
-    num_epochs = len(history["train_loss"])
-    if num_epochs == 0:
-        print("[WARN] No epochs logged, skipping plots.")
-    else:
-        epochs = np.arange(1, num_epochs + 1)
-
-        # Loss
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["train_loss"], label="train")
-        plt.plot(epochs, history["val_loss"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("Loss")
-        plt.title("Train/Val Loss")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "loss.png"), dpi=200)
-        plt.close()
-
-        # Accuracy
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["train_acc"], label="train")
-        plt.plot(epochs, history["val_acc"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("Accuracy")
-        plt.title("Train/Val Accuracy")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "accuracy.png"), dpi=200)
-        plt.close()
-
-        # F1
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["train_f1"], label="train")
-        plt.plot(epochs, history["val_f1"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("F1-score")
-        plt.title("Train/Val F1")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "f1.png"), dpi=200)
-        plt.close()
-
-        # ROC AUC (val)
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["val_roc_auc"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("ROC AUC")
-        plt.title("Validation ROC AUC")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "roc_auc.png"), dpi=200)
-        plt.close()
-
-        # Graph IoU (best)
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["val_graph_iou_best"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("Graph IoU (best)")
-        plt.title("Validation Graph IoU (best)")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "graph_iou_best.png"), dpi=200)
-        plt.close()
-
-        # Graph IoU AUC
-        plt.figure(figsize=(6, 4))
-        plt.plot(epochs, history["val_graph_iou_auc"], label="val")
-        plt.xlabel("Epoch")
-        plt.ylabel("Graph IoU AUC")
-        plt.title("Validation Graph IoU AUC")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, "graph_iou_auc.png"), dpi=200)
-        plt.close()
-
-        # Soft IoU
-        if len(history["train_soft_iou"]) > 0 and len(history["val_soft_iou"]) > 0:
-            plt.figure(figsize=(6, 4))
-            plt.plot(epochs, history["train_soft_iou"], label="train")
-            plt.plot(epochs, history["val_soft_iou"], label="val")
-            plt.xlabel("Epoch")
-            plt.ylabel("Soft IoU")
-            plt.title("Train/Val Soft IoU")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(plots_dir, "soft_iou.png"), dpi=200)
-            plt.close()
+    plot_training_history(history, plots_dir)
 
     # Save classifier
     clf_path = os.path.join(args.out_dir, "edge_classifier.pth")
