@@ -79,7 +79,8 @@ def train_epoch(
                 feat_i[swap_mask] = feat_j[swap_mask]
                 feat_j[swap_mask] = tmp
 
-        preds = classifier(feat_i, feat_j)  # (B,)
+        out = classifier(feat_i, feat_j)
+        preds = out["logits"] if isinstance(out, dict) else out  # (B,)
 
         # Main BCE loss on binary labels
         loss_bce = criterion(preds, labels)
@@ -189,7 +190,8 @@ def eval_epoch(
         labels = labels.to(device)
         strengths = strengths.to(device)
 
-        logits = classifier(feat_i, feat_j)  # (B,) raw logits
+        out = classifier(feat_i, feat_j)  # dict or tensor
+        logits = out["logits"] if isinstance(out, dict) else out  # (B,) raw logits
 
         all_logits.append(logits.detach().cpu())
         all_labels.append(labels.detach().cpu())

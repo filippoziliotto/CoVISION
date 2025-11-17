@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 # Dataset import: load_dataset_pairs.py
 # ---------------------------------------------------------------------
-from dataset.load_dataset_pairs import build_dataloaders_pairs, build_dataloaders_pairs_cross
+from dataset.load_dataset_pairs import build_dataloaders_pairs
 from utils.utils import set_seed, pairwise_ranking_loss
 from models.PairView import EdgeClassifier, GatedLayerFusion, AttentiveLayerFusion
 
@@ -81,7 +81,8 @@ def train_epoch(
                 feat_i[swap_mask] = feat_j[swap_mask]
                 feat_j[swap_mask] = tmp
 
-        preds = classifier(feat_i, feat_j)  # (B,)
+        out = classifier(feat_i, feat_j)
+        preds = out["logits"] if isinstance(out, dict) else out  # (B,)
 
         # Main BCE loss
         loss_bce = criterion(preds, labels)
@@ -183,7 +184,8 @@ def eval_epoch(
         labels = labels.to(device)
         strengths = strengths.to(device)
 
-        logits = classifier(feat_i, feat_j)  # (B,)
+        out = classifier(feat_i, feat_j)  # dict or tensor
+        logits = out["logits"] if isinstance(out, dict) else out  # (B,)
 
         all_logits.append(logits.detach().cpu())
         all_labels.append(labels.detach().cpu())
@@ -664,7 +666,7 @@ def main():
             emb_mode=args.emb_mode,
             subset="train",
             split_index_path=split_path_train,
-            persist_split_index=args.persist_split_index,
+            persist_split_index = True # args.persist_split_index,
         )
 
         # Eval side: only 'val' subset from eval_dataset_type
@@ -682,7 +684,7 @@ def main():
             emb_mode=args.emb_mode,
             subset="val",
             split_index_path=split_path_eval,
-            persist_split_index=args.persist_split_index,
+            persist_split_index = True # args.persist_split_index,
         )
         meta = {"train": meta_train, "val": meta_eval}
     else:

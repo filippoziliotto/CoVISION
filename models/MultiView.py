@@ -22,7 +22,7 @@ class EdgeClassifier(nn.Module):
         )
         self.layernorm = nn.LayerNorm(4 * emb_dim)
 
-    def forward(self, emb_i: torch.Tensor, emb_j: torch.Tensor) -> torch.Tensor:
+    def forward(self, emb_i: torch.Tensor, emb_j: torch.Tensor):
         """
         emb_i, emb_j:
             - shape (B, E)  for single-layer embeddings
@@ -39,7 +39,7 @@ class EdgeClassifier(nn.Module):
             )  # (B, 4E)
             x = self.layernorm(x)
             out = self.mlp(x).squeeze(-1)  # (B,)
-            return out
+            return {"logits": out}
 
         elif emb_i.ndim == 3:
             # Multi-layer case: (B, L, E)
@@ -61,7 +61,7 @@ class EdgeClassifier(nn.Module):
 
             # Reshape back to (B, L) and average scores over layers
             out = out_flat.view(B, L).mean(dim=1)  # (B,)
-            return out
+            return {"logits": out}
 
         else:
             raise ValueError(
@@ -95,7 +95,8 @@ class GatedLayerFusion(nn.Module):
     def forward(self, emb_i, emb_j):
         if emb_i.ndim == 2:  # single-layer
             h, _ = self.encode_pair(emb_i, emb_j)
-            return self.head(self.norm(h)).squeeze(-1)
+            logits = self.head(self.norm(h)).squeeze(-1)
+            return {"logits": logits}
 
         B, L, E = emb_i.shape
         hs, gs = [], []
@@ -107,7 +108,8 @@ class GatedLayerFusion(nn.Module):
         if G.dim()==3 and G.size(-1)==1:    # scalar gate
             G = G.expand_as(H)
         hbar = (G * H).sum(dim=1) / (G.sum(dim=1) + 1e-6)
-        return self.head(self.norm(hbar)).squeeze(-1)
+        logits = self.head(self.norm(hbar)).squeeze(-1)
+        return {"logits": logits}
 
 
 import torch
@@ -163,7 +165,8 @@ class AttentiveLayerFusion(nn.Module):
         if emb_i.ndim == 2:
             z = self._pair_features(emb_i, emb_j)            # (B, 4E)
             h = self.pair_ff(self.pair_ln(z))                 # (B, H)
-            return self.head(self.norm(h)).squeeze(-1)        # (B,)
+            logits = self.head(self.norm(h)).squeeze(-1)        # (B,)
+            return {"logits": logits}
 
         # Multi-layer case: (B, L, E)
         B, L, E = emb_i.shape
@@ -185,4 +188,5 @@ class AttentiveLayerFusion(nn.Module):
 
         # Fuse CLS-attended summary and gated pooling
         fused = 0.5 * (cls_out + pooled)                     # (B, H)
-        return self.head(self.norm(fused)).squeeze(-1)       # (B,)
+        logits = self.head(self.norm(fused)).squeeze(-1)       # (B,)
+        return {"logits": logits}
