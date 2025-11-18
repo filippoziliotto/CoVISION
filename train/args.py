@@ -151,8 +151,17 @@ def build_multiview_parser() -> argparse.ArgumentParser:
         "--layer_mode",
         type=str,
         default="1st_last",
-        choices=["all", "1st_last", "2nd_last", "3rd_last", "4th_last"],
-        help="Which VGGT layer(s) to use: 'all' or one of the last-k layers.",
+        choices=[
+            "all",
+            "1st_last",
+            "2nd_last",
+            "3rd_last",
+            "4th_last",
+            "last_stages",
+            "mid_to_last_stages",
+        ],
+        help="Which VGGT layer(s) to use: 'all', one of the last-k layers, or a stage range "
+             "('last_stages' = layers 17..end, 'mid_to_last_stages' = layers 12..end).",
     )
     parser.add_argument(
         "--data_split_mode",
@@ -350,7 +359,17 @@ def build_pairview_parser() -> argparse.ArgumentParser:
         "--layer_mode",
         type=str,
         default="1st_last",
-        choices=["all", "1st_last", "2nd_last", "3rd_last", "4th_last"],
+        choices=[
+            "all",
+            "1st_last",
+            "2nd_last",
+            "3rd_last",
+            "4th_last",
+            "last_stages",
+            "mid_to_last_stages",
+        ],
+        help="Which VGGT layer(s) to use: 'all', one of the last-k layers, or a stage range "
+             "('last_stages' = layers 17..end, 'mid_to_last_stages' = layers 12..end).",
     )
     parser.add_argument(
         "--data_split_mode",

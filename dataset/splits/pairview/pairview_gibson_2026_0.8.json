@@ -1,0 +1,2590 @@
+{
+  "info": {
+    "dataset_type": "gibson",
+    "emb_mode": "avg",
+    "seed": 2026,
+    "source": "load_dataset_pairs.py",
+    "split_mode": "scene_disjoint",
+    "train_ratio": 0.8
+  },
+  "train": [
+    {
+      "scene_version": "Adrian-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Adrian-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Adrian-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Adrian-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Adrian-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Adrian-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Adrian-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Adrian-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Adrian-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Adrian-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Andover-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Andover-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Andover-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Andover-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Andover-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Andover-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Andover-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Andover-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Andover-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Andover-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Angiola-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Angiola-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Angiola-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Angiola-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Angiola-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Annawan-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Annawan-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Annawan-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Annawan-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Annawan-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Avonia-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Avonia-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Avonia-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Avonia-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Avonia-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Azusa-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Azusa-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Azusa-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Azusa-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Azusa-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Azusa-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Azusa-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Azusa-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Azusa-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Azusa-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Ballou-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Ballou-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Ballou-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Ballou-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Ballou-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Ballou-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Ballou-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Ballou-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Ballou-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Ballou-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Beach-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Beach-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Beach-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Beach-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Beach-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bolton-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bolton-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bolton-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bolton-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bolton-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bowlus-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bowlus-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Bowlus-1",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Bowlus-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bowlus-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Bowlus-2",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Bowlus-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bowlus-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Bowlus-3",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Bowlus-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bowlus-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Bowlus-4",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Bowlus-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Bowlus-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Bowlus-5",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Brevort-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Brevort-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Brevort-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Brevort-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Brevort-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cantwell-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cantwell-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cantwell-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cantwell-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cantwell-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Capistrano-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Capistrano-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Capistrano-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Capistrano-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Capistrano-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Capistrano-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Capistrano-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Capistrano-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Capistrano-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Capistrano-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Colebrook-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Colebrook-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Colebrook-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Colebrook-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Colebrook-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Convoy-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Convoy-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Convoy-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Convoy-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Convoy-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cooperstown-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cooperstown-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cooperstown-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cooperstown-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Cooperstown-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Delton-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Delton-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Delton-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Delton-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Delton-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Denmark-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Denmark-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Denmark-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Denmark-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Denmark-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dryville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dryville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dryville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dryville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dryville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dunmor-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dunmor-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dunmor-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dunmor-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Dunmor-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eagerville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eagerville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eagerville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eagerville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eagerville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Goffs-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Goffs-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Goffs-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Goffs-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Goffs-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Goffs-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Goffs-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Goffs-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Goffs-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Goffs-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Greigsville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Greigsville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Greigsville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Greigsville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Greigsville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hainesburg-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hainesburg-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hainesburg-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hainesburg-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hainesburg-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hainesburg-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hainesburg-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hainesburg-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hainesburg-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hainesburg-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hambleton-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hambleton-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hambleton-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hambleton-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hambleton-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Haxtun-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Haxtun-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Haxtun-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Haxtun-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Haxtun-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hillsdale-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hillsdale-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hillsdale-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hillsdale-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hillsdale-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hillsdale-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hillsdale-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hillsdale-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hillsdale-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hillsdale-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hometown-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hometown-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hometown-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hometown-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hometown-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hominy-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hominy-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hominy-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hominy-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hominy-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hominy-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hominy-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hominy-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Hominy-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Hominy-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Kerrtown-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Kerrtown-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Kerrtown-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Kerrtown-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Kerrtown-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Maryhill-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Maryhill-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Maryhill-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Maryhill-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Maryhill-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Maryhill-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Maryhill-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Maryhill-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Maryhill-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Maryhill-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mesic-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mesic-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mesic-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mesic-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mesic-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mesic-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mesic-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mesic-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mesic-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mesic-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Micanopy-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Micanopy-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Micanopy-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Micanopy-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Micanopy-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Micanopy-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Micanopy-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Micanopy-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Micanopy-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Micanopy-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mobridge-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mobridge-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mobridge-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mobridge-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mobridge-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Monson-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Monson-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Monson-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Monson-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Monson-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Monson-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Monson-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Monson-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Monson-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Monson-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mosinee-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosinee-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosinee-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosinee-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosinee-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosquito-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosquito-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mosquito-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosquito-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mosquito-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosquito-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mosquito-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosquito-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Mosquito-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Mosquito-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nemacolin-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nemacolin-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nemacolin-1",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Nemacolin-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nemacolin-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nemacolin-2",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Nemacolin-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nemacolin-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nemacolin-3",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Nemacolin-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nemacolin-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nemacolin-4",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Nemacolin-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nemacolin-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nemacolin-5",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Nicut-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nicut-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nicut-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nicut-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nicut-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nimmons-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nimmons-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nimmons-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nimmons-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nimmons-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nimmons-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nimmons-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nimmons-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nimmons-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nimmons-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nuevo-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nuevo-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nuevo-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nuevo-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nuevo-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nuevo-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nuevo-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nuevo-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Nuevo-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Nuevo-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Oyens-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Oyens-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Oyens-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Oyens-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Oyens-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Parole-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Parole-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Parole-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Parole-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Parole-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pettigrew-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pettigrew-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pettigrew-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pettigrew-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pettigrew-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pleasant-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pleasant-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pleasant-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pleasant-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pleasant-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Rancocas-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Rancocas-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Rancocas-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Rancocas-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Rancocas-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Reyno-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Reyno-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Reyno-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Reyno-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Reyno-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Reyno-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Reyno-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Reyno-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Reyno-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Reyno-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Ribera-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Ribera-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Ribera-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Ribera-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Ribera-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roane-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roane-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roane-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roane-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roane-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roeville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roeville-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Roeville-1",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Roeville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roeville-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Roeville-2",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Roeville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roeville-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Roeville-3",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Roeville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roeville-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Roeville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roeville-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Roeville-5",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Rosser-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Rosser-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Rosser-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Rosser-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Rosser-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roxboro-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roxboro-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roxboro-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roxboro-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Roxboro-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sanctuary-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sanctuary-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sanctuary-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sanctuary-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sanctuary-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sands-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sands-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sands-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sands-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sands-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sands-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sands-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sands-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sands-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sands-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sasakwa-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sasakwa-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sasakwa-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sasakwa-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sasakwa-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sawpit-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sawpit-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sawpit-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sawpit-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sawpit-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Scioto-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Scioto-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Scioto-1",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Scioto-1",
+      "split_id": "3"
+    },
+    {
+      "scene_version": "Scioto-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Scioto-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Scioto-2",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Scioto-2",
+      "split_id": "3"
+    },
+    {
+      "scene_version": "Scioto-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Scioto-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Scioto-3",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Scioto-3",
+      "split_id": "3"
+    },
+    {
+      "scene_version": "Scioto-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Scioto-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Scioto-4",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Scioto-4",
+      "split_id": "3"
+    },
+    {
+      "scene_version": "Scioto-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Scioto-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Scioto-5",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Scioto-5",
+      "split_id": "3"
+    },
+    {
+      "scene_version": "Silas-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Silas-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Silas-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Silas-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Silas-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Silas-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Silas-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Silas-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Silas-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Silas-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sisters-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sisters-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sisters-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sisters-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sisters-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sisters-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sisters-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sisters-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sisters-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sisters-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sodaville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sodaville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sodaville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sodaville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sodaville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Soldier-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Soldier-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Soldier-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Soldier-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Soldier-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Soldier-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Soldier-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Soldier-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Soldier-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Soldier-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Spencerville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spencerville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spencerville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spencerville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spencerville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spotswood-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spotswood-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Spotswood-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spotswood-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Spotswood-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spotswood-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Spotswood-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spotswood-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Spotswood-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Spotswood-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stanleyville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stanleyville-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stanleyville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stanleyville-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stanleyville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stanleyville-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stanleyville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stanleyville-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stanleyville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stanleyville-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Sumas-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sumas-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sumas-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sumas-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Sumas-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Superior-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Superior-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Superior-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Superior-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Superior-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Swormville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Swormville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Swormville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Swormville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Swormville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Woonsocket-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Woonsocket-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Woonsocket-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Woonsocket-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Woonsocket-5",
+      "split_id": "0"
+    }
+  ],
+  "val": [
+    {
+      "scene_version": "Albertville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Albertville-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Albertville-1",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Albertville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Albertville-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Albertville-2",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Albertville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Albertville-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Albertville-3",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Albertville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Albertville-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Albertville-4",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Albertville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Albertville-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Albertville-5",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Anaheim-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Anaheim-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Anaheim-1",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Anaheim-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Anaheim-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Anaheim-2",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Anaheim-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Anaheim-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Anaheim-3",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Anaheim-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Anaheim-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Anaheim-4",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Anaheim-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Anaheim-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Anaheim-5",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Applewold-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Applewold-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Applewold-1",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Applewold-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Applewold-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Applewold-2",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Applewold-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Applewold-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Applewold-3",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Applewold-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Applewold-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Applewold-4",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Applewold-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Applewold-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Applewold-5",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Arkansaw-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Arkansaw-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Arkansaw-1",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Arkansaw-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Arkansaw-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Arkansaw-2",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Arkansaw-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Arkansaw-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Arkansaw-3",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Arkansaw-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Arkansaw-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Arkansaw-4",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Arkansaw-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Arkansaw-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Arkansaw-5",
+      "split_id": "2"
+    },
+    {
+      "scene_version": "Crandon-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Crandon-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Crandon-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Crandon-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Crandon-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Crandon-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Crandon-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Crandon-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Crandon-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Crandon-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Eastville-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eastville-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eastville-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eastville-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eastville-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Edgemere-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Edgemere-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Edgemere-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Edgemere-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Edgemere-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Elmira-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Elmira-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Elmira-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Elmira-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Elmira-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eudora-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eudora-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eudora-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eudora-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Eudora-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pablo-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pablo-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pablo-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pablo-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Pablo-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Placida-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Placida-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Placida-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Placida-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Placida-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Quantico-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Quantico-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Quantico-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Quantico-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Quantico-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Seward-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Seward-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Seward-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Seward-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Seward-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Shelbiana-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Shelbiana-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Shelbiana-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Shelbiana-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Shelbiana-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Springhill-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Springhill-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Springhill-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Springhill-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Springhill-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Springhill-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Springhill-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Springhill-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Springhill-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Springhill-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stilwell-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stilwell-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stilwell-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stilwell-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stilwell-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stilwell-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stilwell-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stilwell-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stilwell-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stilwell-5",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stokes-1",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stokes-1",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stokes-2",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stokes-2",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stokes-3",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stokes-3",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stokes-4",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stokes-4",
+      "split_id": "1"
+    },
+    {
+      "scene_version": "Stokes-5",
+      "split_id": "0"
+    },
+    {
+      "scene_version": "Stokes-5",
+      "split_id": "1"
+    }
+  ]
+}

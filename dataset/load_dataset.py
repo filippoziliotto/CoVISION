@@ -308,6 +308,47 @@ def _write_split_index_raw(
         json.dump(payload, f, indent=2, sort_keys=True)
 # Dataset: edge-level pairs from (embeddings, adjacency)
 # -------------------------------------------------------
+def _resolve_layer_indices(layer_mode: str, num_layers: int):
+    """
+    Resolve which VGGT layers to use based on layer_mode.
+
+    Returns:
+        - None to keep all layers
+        - int for a single layer index
+        - list[int] for multiple layers
+    """
+    if layer_mode == "all":
+        return None
+
+    # Negative offsets refer to counting from the end (e.g., -1 = last layer).
+    mode_to_offset = {
+        "1st_last": -1,
+        "2nd_last": -2,
+        "3rd_last": -3,
+        "4th_last": -4,
+    }
+    # 1-based layer ids from the original VGGT: clamp if the model has fewer layers.
+    range_modes = {
+        "last_stages": 17,         # layers 17..L
+        "mid_to_last_stages": 12,  # layers 12..L
+    }
+
+    if layer_mode in mode_to_offset:
+        offset = mode_to_offset[layer_mode]
+        idx = (num_layers + offset) if offset < 0 else offset
+        return max(0, min(num_layers - 1, idx))
+
+    if layer_mode in range_modes:
+        start_1b = range_modes[layer_mode]
+        start_idx = max(0, min(num_layers - 1, start_1b - 1))
+        return list(range(start_idx, num_layers))
+
+    raise ValueError(
+        f"Unknown layer_mode '{layer_mode}'. "
+        f"Expected one of {list(mode_to_offset.keys()) + list(range_modes.keys()) + ['all']}."
+    )
+
+
 class EdgePairDataset(Dataset):
     """
     Each item is (feat_i, feat_j, label) from one of the graphs.
@@ -332,6 +373,7 @@ class EdgePairDataset(Dataset):
         max_neg_ratio: float, maximum number of negatives to keep per positive (ratio)
         hard_neg_ratio: float in [0,1], fraction of selected negatives that should be "hard"
         hard_neg_rel_thr: minimum rel_mat[i,j] value for a negative to be considered hard
+        layer_mode: "all", one of the last-k modes, or stage ranges ("last_stages", "mid_to_last_stages")
         """
         self.layer_mode = layer_mode
         self.pairs = []
@@ -351,26 +393,7 @@ class EdgePairDataset(Dataset):
             L, N, E = emb.shape
 
             # Decide which layers to use
-            mode = self.layer_mode
-            if mode == "all":
-                layer_indices = None  # use all layers, keep as (L, E)
-            else:
-                mode_to_offset = {
-                    "1st_last": -1,
-                    "2nd_last": -2,
-                    "3rd_last": -3,
-                    "4th_last": -4,
-                }
-                if mode not in mode_to_offset:
-                    raise ValueError(
-                        f"Unknown layer_mode '{mode}'. "
-                        f"Expected one of {list(mode_to_offset.keys()) + ['all']}."
-                    )
-                offset = mode_to_offset[mode]
-                # Convert negative offset to concrete index in [0, L-1]
-                idx = (L + offset) if offset < 0 else offset
-                idx = max(0, min(L - 1, idx))
-                layer_indices = idx  # single int
+            layer_indices = _resolve_layer_indices(self.layer_mode, L)
 
             pos_pairs = []
             neg_pairs_hard = []
@@ -391,8 +414,12 @@ class EdgePairDataset(Dataset):
                         # Use all layers: feat_i, feat_j are (L, E)
                         feat_i = emb[:, i, :].astype(np.float32)
                         feat_j = emb[:, j, :].astype(np.float32)
+                    elif isinstance(layer_indices, int):
+                        # Single layer index
+                        feat_i = emb[layer_indices, i, :].astype(np.float32)
+                        feat_j = emb[layer_indices, j, :].astype(np.float32)
                     else:
-                        # Single layer: feat_i, feat_j are (E,)
+                        # Multiple layers in a slice/list
                         feat_i = emb[layer_indices, i, :].astype(np.float32)
                         feat_j = emb[layer_indices, j, :].astype(np.float32)
 
@@ -706,7 +733,20 @@ if __name__ == "__main__":
         help="Split mode: 'scene_disjoint', 'version_disjoint', or 'graph'."
     )
     parser.add_argument(
-        "--layer_mode", type=str, default="all", help="Layer mode for embeddings.")
+        "--layer_mode",
+        type=str,
+        default="all",
+        choices=[
+            "all",
+            "1st_last",
+            "2nd_last",
+            "3rd_last",
+            "4th_last",
+            "last_stages",
+            "mid_to_last_stages",
+        ],
+        help="Layer mode for embeddings.",
+    )
     parser.add_argument(
         "--dataset_type",
         type=str,

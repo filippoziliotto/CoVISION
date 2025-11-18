@@ -14,6 +14,41 @@ import argparse
 PRED_ROOT = "data/predictions_feat"
 
 
+def _resolve_layer_indices(layer_mode: str, num_layers: int):
+    """
+    Resolve which VGGT layers to use based on layer_mode.
+    Returns None for all layers, a single int for one layer, or a list[int] for a range.
+    """
+    if layer_mode == "all":
+        return None
+
+    mode_to_offset = {
+        "1st_last": -1,
+        "2nd_last": -2,
+        "3rd_last": -3,
+        "4th_last": -4,
+    }
+    range_modes = {
+        "last_stages": 17,         # layers 17..L
+        "mid_to_last_stages": 12,  # layers 12..L
+    }
+
+    if layer_mode in mode_to_offset:
+        offset = mode_to_offset[layer_mode]
+        idx = (num_layers + offset) if offset < 0 else offset
+        return max(0, min(num_layers - 1, idx))
+
+    if layer_mode in range_modes:
+        start_1b = range_modes[layer_mode]
+        start_idx = max(0, min(num_layers - 1, start_1b - 1))
+        return list(range(start_idx, num_layers))
+
+    raise ValueError(
+        f"Unknown layer_mode '{layer_mode}'. "
+        f"Expected one of {list(mode_to_offset.keys()) + list(range_modes.keys()) + ['all']}."
+    )
+
+
 # -------------------------------------------------------
 # Discover pair npz files under data/predictions_feat
 # -------------------------------------------------------
@@ -297,7 +332,8 @@ class EdgePairDatasetPairs(Dataset):
         max_neg_ratio: float, maximum number of negatives to keep per positive (ratio)
         hard_neg_ratio: float in [0,1], fraction of selected negatives that should be "hard"
         hard_neg_rel_thr: minimum strength value for a negative to be considered hard
-        layer_mode: "all" or one of ["1st_last", "2nd_last", "3rd_last", "4th_last"]
+        layer_mode: "all" or one of ["1st_last", "2nd_last", "3rd_last", "4th_last",
+                                     "last_stages", "mid_to_last_stages"]
         """
         self.layer_mode = layer_mode
         self.pairs = []
@@ -327,25 +363,7 @@ class EdgePairDatasetPairs(Dataset):
             P, L, E = emb_i.shape
 
             # Decide which layers to use
-            mode = self.layer_mode
-            if mode == "all":
-                layer_indices = None  # keep (L, E)
-            else:
-                mode_to_offset = {
-                    "1st_last": -1,
-                    "2nd_last": -2,
-                    "3rd_last": -3,
-                    "4th_last": -4,
-                }
-                if mode not in mode_to_offset:
-                    raise ValueError(
-                        f"Unknown layer_mode '{mode}'. "
-                        f"Expected one of {list(mode_to_offset.keys()) + ['all']}."
-                    )
-                offset = mode_to_offset[mode]
-                idx = (L + offset) if offset < 0 else offset
-                idx = max(0, min(L - 1, idx))
-                layer_indices = idx  # int index
+            layer_indices = _resolve_layer_indices(self.layer_mode, L)
 
             pos_pairs = []
             neg_pairs_hard = []
@@ -359,10 +377,14 @@ class EdgePairDatasetPairs(Dataset):
                     # Use all layers: (L, E)
                     feat_i = emb_i[p, :, :]  # (L, E)
                     feat_j = emb_j[p, :, :]  # (L, E)
-                else:
+                elif isinstance(layer_indices, int):
                     # Single layer: (E,)
                     feat_i = emb_i[p, layer_indices, :]  # (E,)
                     feat_j = emb_j[p, layer_indices, :]  # (E,)
+                else:
+                    # Multiple layers: (L_sub, E)
+                    feat_i = emb_i[p, layer_indices, :]  # (L_sub, E)
+                    feat_j = emb_j[p, layer_indices, :]  # (L_sub, E)
 
                 triple = (
                     feat_i.astype(np.float32),
@@ -773,7 +795,15 @@ if __name__ == "__main__":
         "--layer_mode",
         type=str,
         default="1st_last",
-        choices=["all", "1st_last", "2nd_last", "3rd_last", "4th_last"],
+        choices=[
+            "all",
+            "1st_last",
+            "2nd_last",
+            "3rd_last",
+            "4th_last",
+            "last_stages",
+            "mid_to_last_stages",
+        ],
     )
     parser.add_argument(
         "--dataset_type",

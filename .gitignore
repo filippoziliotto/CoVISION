@@ -6,6 +6,7 @@ old/
 keys/
 wandb/
 TODO.txt
+TODO.md
 *.pth
 **/plots/
 slurm/
