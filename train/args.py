@@ -4,7 +4,7 @@ import argparse
 def build_multiview_parser() -> argparse.ArgumentParser:
     """Argument parser for train/vggt_train.py."""
     parser = argparse.ArgumentParser(
-        description="Train EdgeClassifier on precomputed embeddings/adjacency (CoVisGraphDataset)"
+        description="Train Co-VGGT on precomputed embeddings/adjacency (CoVisGraphDataset)"
     )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -57,6 +57,12 @@ def build_multiview_parser() -> argparse.ArgumentParser:
         "--wandb_off",
         action="store_true",
         help="Disable wandb logging",
+    )
+    parser.add_argument(
+        "--log_file",
+        type=str,
+        default="train.log",
+        help="Filename for run logs (placed inside out_dir). Use empty string to disable file logging.",
     )
     # Early stopping + LR scheduler
     parser.add_argument(
@@ -212,6 +218,11 @@ def build_multiview_parser() -> argparse.ArgumentParser:
         choices=["edge", "gated", "attention"],
         help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
     )
+    parser.add_argument(
+        "--save_plots",
+        action="store_true",
+        help="If set, save training/validation plots to out_dir.",
+    )
     parser.add_argument("--split_index_path", type=str, default=None,
                         help="Optional path to a persisted meta-level split index (.json).")
     parser.add_argument("--persist_split_index", action="store_true",
@@ -256,6 +267,12 @@ def build_pairview_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wandb_off",
         action="store_true",
+    )
+    parser.add_argument(
+        "--log_file",
+        type=str,
+        default="train.log",
+        help="Filename for run logs (placed inside out_dir). Use empty string to disable file logging.",
     )
     # Early stopping + LR scheduler
     parser.add_argument(

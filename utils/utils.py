@@ -1,11 +1,95 @@
 import os
 import random
-from typing import Optional
+from datetime import datetime
+from typing import Dict, Iterable, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+# Common scalar metrics we want to log across stdout/file/wandb
+METRIC_LOG_KEYS = (
+    "loss",
+    "acc",
+    "f1",
+    "roc_auc",
+    "pr_auc",
+    "graph_iou_best",
+    "graph_iou_auc",
+    "graph_iou_best_thres",
+    "soft_iou",
+)
+
+
+class RunLogger:
+    """Lightweight logger that mirrors messages to stdout and an optional file."""
+
+    def __init__(self, log_path: Optional[str] = None) -> None:
+        self.log_path = log_path
+        self._fh = None
+        if log_path:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            self._fh = open(log_path, "a", encoding="utf-8")
+
+    def log(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        print(line)
+        if self._fh:
+            self._fh.write(line + "\n")
+            self._fh.flush()
+
+    def close(self) -> None:
+        if self._fh:
+            self._fh.close()
+            self._fh = None
+
+
+def create_run_logger(out_dir: str, log_file: Optional[str]) -> RunLogger:
+    """Create a RunLogger writing to `out_dir/log_file` (or stdout only if empty)."""
+    if log_file:
+        log_path = log_file if os.path.isabs(log_file) else os.path.join(out_dir, log_file)
+    else:
+        log_path = None
+    return RunLogger(log_path)
+
+
+def format_metric_line(metrics: Dict[str, float], keys: Iterable[str] = METRIC_LOG_KEYS) -> str:
+    """Format a metrics dict into a stable, ordered string for logging."""
+    parts = []
+    for key in keys:
+        if key not in metrics:
+            continue
+        val = metrics[key]
+        if val is None:
+            val_str = "nan"
+        else:
+            try:
+                if isinstance(val, float) and (np.isnan(val) or np.isinf(val)):
+                    val_str = "nan"
+                elif key == "loss":
+                    val_str = f"{float(val):.4f}"
+                else:
+                    val_str = f"{float(val):.3f}"
+            except Exception:
+                val_str = str(val)
+        parts.append(f"{key}={val_str}")
+    return " | ".join(parts)
+
+
+def prefix_metrics(metrics: Dict[str, float], prefix: str, keys: Iterable[str] = METRIC_LOG_KEYS) -> Dict[str, float]:
+    """Create a new dict with prefixed metric keys, keeping only known scalar metrics."""
+    payload: Dict[str, float] = {}
+    for key in keys:
+        if key not in metrics:
+            continue
+        try:
+            payload[f"{prefix}_{key}"] = float(metrics[key])
+        except Exception:
+            # Ignore non-scalar entries such as arrays
+            continue
+    return payload
 
 def adj_to_edges(adj: np.ndarray, threshold: float = 0.5):
     """
