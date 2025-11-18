@@ -2,6 +2,8 @@
 import os
 import sys
 import argparse
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -10,14 +12,25 @@ import torch.nn.functional as F
 
 # Remove FutureWarnings
 import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
+
+warnings.simplefilter(action="ignore", category=FutureWarning)
+
+# Ensure imports work regardless of where the script is run
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(REPO_ROOT))
+sys.path.append(str(REPO_ROOT / "vggt"))
 
 
 # ---------------------------------------------------------------------
 # Paths / constants (mirroring vggt_feat_eval.py)
 # ---------------------------------------------------------------------
-HM3D_ROOT_CANDIDATE = "data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg"
-GIBSON_ROOT_CANDIDATE = "data/vast/cc7287/gvgg-3"
+def _abs_path(path_str: str) -> str:
+    path = Path(path_str)
+    return str(path if path.is_absolute() else (REPO_ROOT / path))
+
+
+HM3D_ROOT_CANDIDATE = _abs_path("data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg")
+GIBSON_ROOT_CANDIDATE = _abs_path("data/vast/cc7287/gvgg-3")
 
 USE_HM3D = True
 HVGG_ROOT = None
@@ -35,14 +48,13 @@ else:
     GIBSON_ROOT = GIBSON_ROOT_CANDIDATE
     HVGG_ROOT = GIBSON_ROOT
     MORE_VIS_ROOT = GIBSON_ROOT
-    BASE_CSV_NAME = "GroundTruth"
+BASE_CSV_NAME = "GroundTruth"
 
-PRED_ROOT = "data/predictions_feat/hvgg" if USE_HM3D else "data/predictions_feat/gvgg"
+PRED_ROOT = _abs_path("data/predictions_feat/hvgg") if USE_HM3D else _abs_path("data/predictions_feat/gvgg")
 
 # ---------------------------------------------------------------------
 # VGGT imports
 # ---------------------------------------------------------------------
-sys.path.append(os.path.abspath("vggt"))
 from vggt.vggt.models.vggt import VGGT
 from vggt.vggt.utils.load_fn import load_and_preprocess_images
 
@@ -298,27 +310,22 @@ def main():
     )
     args = parser.parse_args()
 
-    # Override dataset selection if requested
+    # Dataset selection (explicit flag only)
+    USE_HM3D = args.use_scene == "hm3d"
     if USE_HM3D:
-        USE_HM3D = True
-        HVGG_ROOT = "data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg"
+        HVGG_ROOT = HM3D_ROOT_CANDIDATE
         MORE_VIS_ROOT = HVGG_ROOT
         BASE_CSV_NAME = "GroundTruth"
-        print("[INFO] Overriding: using HM3D dataset.")
+        print("[INFO] Using HM3D dataset.")
     else:
-        USE_HM3D = False
-        GIBSON_ROOT = "data/vast/cc7287/gvgg-3"
+        GIBSON_ROOT = GIBSON_ROOT_CANDIDATE
         HVGG_ROOT = GIBSON_ROOT
         MORE_VIS_ROOT = GIBSON_ROOT
         BASE_CSV_NAME = "GroundTruth"
-        print("[INFO] Overriding: using Gibson dataset.")
-        if USE_HM3D:
-            print("[INFO] Auto-detected: using HM3D dataset.")
-        else:
-            print("[INFO] Auto-detected: using Gibson dataset.")
+        print("[INFO] Using Gibson dataset.")
 
     global PRED_ROOT
-    PRED_ROOT = "data/predictions_feat/hvgg" if USE_HM3D else "data/predictions_feat/gvgg"
+    PRED_ROOT = _abs_path("data/predictions_feat/hvgg") if USE_HM3D else _abs_path("data/predictions_feat/gvgg")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[INFO] Using device: {device}")

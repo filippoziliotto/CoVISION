@@ -2,6 +2,7 @@
 import os
 import sys
 import argparse
+from pathlib import Path
 
 from typing import List, Tuple
 
@@ -12,15 +13,25 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 
-# Make sure we can import vggt from the repo root
-sys.path.append(os.path.abspath("vggt"))
+# Ensure imports work regardless of cwd
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(REPO_ROOT))
+sys.path.append(str(REPO_ROOT / "vggt"))
+
+
+def _abs_path(path_str: str) -> str:
+    path = Path(path_str)
+    return str(path if path.is_absolute() else (REPO_ROOT / path))
+
+
 from vggt.vggt.models.vggt import VGGT
 from vggt.vggt.utils.load_fn import load_and_preprocess_images
-from save_embeds import make_image_embeddings
+from feature_extractor.save_embeds import make_image_embeddings
 
 # Remove FutureWarnings
 import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
+
+warnings.simplefilter(action="ignore", category=FutureWarning)
 
 
 PRED_ROOT = None
@@ -306,7 +317,7 @@ def main():
     parser.add_argument(
         "--base_root",
         type=str,
-        default="data/vast/cc7287/gvgg-1",
+        default=_abs_path("data/vast/cc7287/gvgg-1"),
         help="Base root for Gibson (e.g. data/vast/cc7287/gvgg-1) or for HM3D: the shared hvgg root (e.g. data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg)",
     )
     parser.add_argument(
@@ -344,10 +355,12 @@ def main():
     print(f"[INFO] Using device: {device}")
 
     # Set PRED_ROOT based on base_root
-    if "hvgg" in args.base_root:
-        PRED_ROOT = "data/predictions_feat/hvgg"
+    base_root = _abs_path(args.base_root)
+
+    if "hvgg" in base_root:
+        PRED_ROOT = _abs_path("data/predictions_feat/hvgg")
     else:
-        PRED_ROOT = "data/predictions_feat/gvgg"
+        PRED_ROOT = _abs_path("data/predictions_feat/gvgg")
     os.makedirs(PRED_ROOT, exist_ok=True)
     print(f"[INFO] Saving pair embeddings under: {PRED_ROOT}")
 
@@ -358,7 +371,7 @@ def main():
     print("[INFO] VGGT initialized.")
 
     # Discover scene splits under this base_root
-    scene_splits = discover_scene_splits(args.base_root)
+    scene_splits = discover_scene_splits(base_root)
     if not scene_splits:
         print(f"[WARN] No valid scene splits under {args.base_root}")
         return
