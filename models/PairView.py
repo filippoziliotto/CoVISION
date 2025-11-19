@@ -157,6 +157,10 @@ class AttentiveLayerFusion(nn.Module):
         # Temperature for gating softmax
         self.tau = nn.Parameter(torch.tensor(1.0))
 
+        # Global log-prior over layers (probe-aware bias; learned from data).
+        # We assume at most 24 VGGT layers and slice to the current L at runtime.
+        self.layer_log_prior = nn.Parameter(torch.zeros(24))
+
     @staticmethod
     def _pair_features(ei, ej):
         return torch.cat([ei, ej, (ei - ej).abs(), ei * ej], dim=-1)
@@ -184,6 +188,10 @@ class AttentiveLayerFusion(nn.Module):
 
         # Gated pooling across layers (softmax on scalar gates)
         gate_scores = self.gate_mlp(z).squeeze(-1)           # (B, L)
+        # Add global log-prior over layers (broadcast over batch)
+        L_cur = gate_scores.size(1)
+        log_prior = self.layer_log_prior[:L_cur].unsqueeze(0)  # (1, L_cur)
+        gate_scores = gate_scores + log_prior
         alpha = torch.softmax(gate_scores / (self.tau.abs() + 1e-6), dim=1)  # (B, L)
         pooled = (alpha.unsqueeze(-1) * H).sum(dim=1)        # (B, H)
 
