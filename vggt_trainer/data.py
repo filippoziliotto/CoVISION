@@ -1,0 +1,403 @@
+#!/usr/bin/env python
+"""
+Utilities for building dataloaders that read RGB image pairs directly from saved_obs folders.
+
+This mirrors the discovery logic used when saving embeddings, but returns tensors that are
+ready to be consumed by VGGT without going through the intermediate NPZ stage.
+"""
+from __future__ import annotations
+
+import csv
+import os
+import random
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+
+from vggt.vggt.utils.load_fn import (
+    load_and_preprocess_images,
+    load_and_preprocess_images_square,
+)
+
+# Dataset layouts taken from dataset/load_dataset.py to keep behavior consistent.
+GIBSON_BASE_PATTERN = "data/vast/cc7287/gvgg-{i}"
+HM3D_BASE_PATTERN = (
+    "data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg/part{i}"
+)
+HM3D_PARTS = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "l"]
+
+
+@dataclass
+class PairRecord:
+    scene_version: str
+    split_id: str
+    saved_obs: str
+    img_i: str
+    img_j: str
+    label: float
+    strength: float
+
+
+def _default_train_ratio(dataset_type: str, override: Optional[float]) -> float:
+    if override is not None:
+        return override
+    return 0.8 if dataset_type == "gibson" else 0.9
+
+
+def _discover_scene_splits(dataset_type: str) -> List[Dict[str, str]]:
+    """Mimic dataset.load_dataset._discover_scene_splits without importing private helpers."""
+    splits: List[Dict[str, str]] = []
+
+    if dataset_type == "hm3d":
+        for part in HM3D_PARTS:
+            base_root = HM3D_BASE_PATTERN.format(i=part)
+            more_vis_root = os.path.join(base_root, "temp", "More_vis")
+            if not os.path.isdir(more_vis_root):
+                continue
+            for scene_name in sorted(os.listdir(more_vis_root)):
+                scene_dir = os.path.join(more_vis_root, scene_name)
+                if not os.path.isdir(scene_dir) or not scene_name.endswith(".basis"):
+                    continue
+                scene_id = scene_name.split(".basis")[0]
+                for split_name in sorted(os.listdir(scene_dir)):
+                    split_dir = os.path.join(scene_dir, split_name)
+                    if not (os.path.isdir(split_dir) and split_name.isdigit()):
+                        continue
+                    saved_obs = os.path.join(split_dir, "saved_obs")
+                    gt_csv = os.path.join(saved_obs, "GroundTruth.csv")
+                    if os.path.isdir(saved_obs) and os.path.isfile(gt_csv):
+                        splits.append(
+                            dict(
+                                scene_version=scene_id,
+                                split_id=split_name,
+                                saved_obs=saved_obs,
+                            )
+                        )
+    else:
+        for i in range(1, 6):
+            base_root = GIBSON_BASE_PATTERN.format(i=i)
+            candidates = [
+                os.path.join(base_root, "temp", "More_vis"),
+                os.path.join(base_root, "More_vis"),
+            ]
+            for more_vis_root in candidates:
+                if not os.path.isdir(more_vis_root):
+                    continue
+                for scene_name in sorted(os.listdir(more_vis_root)):
+                    scene_dir = os.path.join(more_vis_root, scene_name)
+                    if not os.path.isdir(scene_dir):
+                        continue
+                    for split_name in sorted(os.listdir(scene_dir)):
+                        split_dir = os.path.join(scene_dir, split_name)
+                        if not (os.path.isdir(split_dir) and split_name.isdigit()):
+                            continue
+                        saved_obs = os.path.join(split_dir, "saved_obs")
+                        gt_csv = os.path.join(saved_obs, "GroundTruth.csv")
+                        if os.path.isdir(saved_obs) and os.path.isfile(gt_csv):
+                            splits.append(
+                                dict(
+                                    scene_version=scene_name,
+                                    split_id=split_name,
+                                    saved_obs=saved_obs,
+                                )
+                            )
+    return splits
+
+
+def _split_meta(
+    meta: List[Dict[str, str]],
+    seed: int,
+    train_ratio: float,
+    split_mode: str,
+) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], Dict[str, Sequence[str]]]:
+    """Split meta entries deterministically according to split_mode."""
+    if not meta:
+        raise RuntimeError("No saved_obs splits discovered.")
+
+    rng = random.Random(seed)
+    for item in meta:
+        if "base_scene" not in item:
+            item["base_scene"] = item["scene_version"].split("-")[0]
+
+    if split_mode == "scene_disjoint":
+        scenes = sorted({m["base_scene"] for m in meta})
+        rng.shuffle(scenes)
+        pivot = max(1, int(len(scenes) * train_ratio))
+        train_scenes = set(scenes[:pivot])
+        train_meta = [m for m in meta if m["base_scene"] in train_scenes]
+        val_meta = [m for m in meta if m["base_scene"] not in train_scenes]
+    elif split_mode == "version_disjoint":
+        versions = sorted({m["scene_version"] for m in meta})
+        rng.shuffle(versions)
+        pivot = max(1, int(len(versions) * train_ratio))
+        train_versions = set(versions[:pivot])
+        train_meta = [m for m in meta if m["scene_version"] in train_versions]
+        val_meta = [m for m in meta if m["scene_version"] not in train_versions]
+        train_scenes = {m["base_scene"] for m in train_meta}
+    elif split_mode == "graph":
+        idxs = list(range(len(meta)))
+        rng.shuffle(idxs)
+        pivot = max(1, int(len(idxs) * train_ratio))
+        train_idx = set(idxs[:pivot])
+        train_meta = [meta[i] for i in idxs if i in train_idx]
+        val_meta = [meta[i] for i in idxs if i not in train_idx]
+        train_scenes = {m["base_scene"] for m in train_meta}
+    else:
+        raise ValueError(
+            f"Invalid split_mode '{split_mode}'. "
+            "Expected one of {'scene_disjoint', 'version_disjoint', 'graph'}."
+        )
+
+    val_scenes = {m["base_scene"] for m in val_meta}
+    stats = dict(
+        train_scenes=sorted(train_scenes),
+        val_scenes=sorted(val_scenes),
+    )
+    return train_meta, val_meta, stats
+
+
+def _load_rel_matrix(saved_obs: str) -> Optional[np.ndarray]:
+    rel_path = os.path.join(saved_obs, "rel_mat.npy")
+    if os.path.isfile(rel_path):
+        try:
+            rel = np.load(rel_path)
+            return rel
+        except Exception:
+            pass
+    return None
+
+
+def _load_pairs_for_split(
+    split_meta: Dict[str, str],
+    max_pairs_per_split: int,
+    rng: random.Random,
+) -> List[PairRecord]:
+    """Read GroundTruth.csv for a single saved_obs directory."""
+    saved_obs = split_meta["saved_obs"]
+    gt_csv = os.path.join(saved_obs, "GroundTruth.csv")
+    if not os.path.isfile(gt_csv):
+        return []
+
+    rel_mat = _load_rel_matrix(saved_obs)
+    img_files = sorted(f for f in os.listdir(saved_obs) if f.endswith(".png"))
+    name_to_idx = {f: idx for idx, f in enumerate(img_files)}
+
+    pairs: List[PairRecord] = []
+    with open(gt_csv, newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            basename_i = os.path.basename(row["image_1"])
+            basename_j = os.path.basename(row["image_2"])
+            if basename_i not in name_to_idx or basename_j not in name_to_idx:
+                continue
+            path_i = os.path.join(saved_obs, basename_i)
+            path_j = os.path.join(saved_obs, basename_j)
+            if (not os.path.isfile(path_i)) or (not os.path.isfile(path_j)):
+                continue
+
+            label = float(row.get("label", 0))
+            idx_i = name_to_idx[basename_i]
+            idx_j = name_to_idx[basename_j]
+
+            if rel_mat is not None and rel_mat.shape[0] > max(idx_i, idx_j):
+                strength = float(rel_mat[idx_i, idx_j])
+            else:
+                strength = label
+
+            pairs.append(
+                PairRecord(
+                    scene_version=split_meta["scene_version"],
+                    split_id=split_meta["split_id"],
+                    saved_obs=saved_obs,
+                    img_i=path_i,
+                    img_j=path_j,
+                    label=label,
+                    strength=strength,
+                )
+            )
+
+    if max_pairs_per_split > 0 and len(pairs) > max_pairs_per_split:
+        pairs = rng.sample(pairs, k=max_pairs_per_split)
+
+    return pairs
+
+
+def _load_pairs_for_meta(
+    meta_list: List[Dict[str, str]],
+    max_pairs_per_split: int,
+    seed: int,
+) -> List[PairRecord]:
+    rng = random.Random(seed)
+    all_pairs: List[PairRecord] = []
+    for idx, split_meta in enumerate(meta_list):
+        split_pairs = _load_pairs_for_split(split_meta, max_pairs_per_split, rng)
+        all_pairs.extend(split_pairs)
+        if idx % 10 == 0:
+            print(
+                f"[DATA] Loaded {len(split_pairs)} pairs from "
+                f"{split_meta['scene_version']} split {split_meta['split_id']} "
+                f"(running total={len(all_pairs)})"
+            )
+    return all_pairs
+
+
+def _resize_pair_to_square(images: torch.Tensor, target_size: int) -> torch.Tensor:
+    """Pad/crop a pair tensor (N=2,3,H,W) to (2,3,target_size,target_size)."""
+    processed = []
+    for img in images:
+        c, h, w = img.shape
+        if h > target_size:
+            start = (h - target_size) // 2
+            img = img[:, start : start + target_size, :]
+            h = img.shape[1]
+        if w > target_size:
+            start = (w - target_size) // 2
+            img = img[:, :, start : start + target_size]
+            w = img.shape[2]
+
+        pad_h = max(0, target_size - h)
+        pad_w = max(0, target_size - w)
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        if pad_h > 0 or pad_w > 0:
+            img = F.pad(
+                img,
+                (pad_left, pad_right, pad_top, pad_bottom),
+                mode="constant",
+                value=1.0,
+            )
+        processed.append(img)
+    return torch.stack(processed, dim=0)
+
+
+def load_pair_tensor(
+    image_paths: Sequence[str],
+    preprocess_mode: str,
+    square_size: int,
+) -> torch.Tensor:
+    """Load and preprocess two RGB paths into a tensor shaped (2, 3, square_size, square_size)."""
+    if preprocess_mode == "square":
+        images, _ = load_and_preprocess_images_square(
+            list(image_paths), target_size=square_size
+        )
+    else:
+        images = load_and_preprocess_images(list(image_paths), mode=preprocess_mode)
+        images = _resize_pair_to_square(images, square_size)
+    return images
+
+
+class PairImageDataset(Dataset):
+    """Simple dataset wrapper around PairRecord entries."""
+
+    def __init__(
+        self,
+        pairs: List[PairRecord],
+        preprocess_mode: str = "square",
+        square_size: int = 518,
+    ):
+        if not pairs:
+            raise RuntimeError("PairImageDataset cannot be instantiated with zero samples.")
+        self.pairs = pairs
+        self.preprocess_mode = preprocess_mode
+        self.square_size = square_size
+
+    def __len__(self) -> int:
+        return len(self.pairs)
+
+    def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
+        record = self.pairs[index]
+        images = load_pair_tensor(
+            (record.img_i, record.img_j),
+            preprocess_mode=self.preprocess_mode,
+            square_size=self.square_size,
+        )
+        return {
+            "images": images,
+            "label": torch.tensor(record.label, dtype=torch.float32),
+            "strength": torch.tensor(record.strength, dtype=torch.float32),
+            "scene_version": record.scene_version,
+            "split_id": record.split_id,
+        }
+
+
+def build_image_pair_dataloaders(
+    dataset_type: str,
+    batch_size: int,
+    num_workers: int,
+    seed: int,
+    train_ratio: Optional[float],
+    split_mode: str,
+    preprocess_mode: str,
+    square_size: int,
+    max_pairs_per_split: int,
+) -> Tuple[DataLoader, Optional[DataLoader], PairImageDataset, Optional[PairImageDataset], Dict]:
+    """Entry point used by the training script."""
+    train_ratio = _default_train_ratio(dataset_type, train_ratio)
+    split_meta = _discover_scene_splits(dataset_type)
+    train_meta, val_meta, stats = _split_meta(split_meta, seed, train_ratio, split_mode)
+
+    train_pairs = _load_pairs_for_meta(train_meta, max_pairs_per_split, seed)
+    val_pairs = _load_pairs_for_meta(val_meta, max_pairs_per_split, seed + 1) if val_meta else []
+
+    train_dataset = PairImageDataset(
+        train_pairs, preprocess_mode=preprocess_mode, square_size=square_size
+    )
+    val_dataset = (
+        PairImageDataset(
+            val_pairs, preprocess_mode=preprocess_mode, square_size=square_size
+        )
+        if val_pairs
+        else None
+    )
+
+    pin_memory = torch.cuda.is_available()
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        drop_last=False,
+        pin_memory=pin_memory,
+    )
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            drop_last=False,
+            pin_memory=pin_memory,
+        )
+
+    meta = dict(
+        train_pairs=len(train_dataset),
+        val_pairs=len(val_dataset) if val_dataset is not None else 0,
+        train_scenes=len(stats["train_scenes"]),
+        val_scenes=len(stats["val_scenes"]),
+        train_ratio=train_ratio,
+        split_mode=split_mode,
+    )
+
+    print(
+        f"[DATA] train_pairs={meta['train_pairs']} "
+        f"(scenes={meta['train_scenes']}), "
+        f"val_pairs={meta['val_pairs']} "
+        f"(scenes={meta['val_scenes']})"
+    )
+
+    return train_loader, val_loader, train_dataset, val_dataset, meta
+
+
+__all__ = [
+    "PairImageDataset",
+    "PairRecord",
+    "build_image_pair_dataloaders",
+    "load_pair_tensor",
+]

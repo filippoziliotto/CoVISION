@@ -51,7 +51,7 @@ def build_multiview_parser() -> argparse.ArgumentParser:
         help="Max gradient norm for clipping (0.0 disables clipping).",
     )
     # Wandb
-    parser.add_argument("--wandb_project", type=str, default="Co-Vision")
+    parser.add_argument("--wandb_project", type=str, default="Co-Vision-New")
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument(
         "--wandb_off",
