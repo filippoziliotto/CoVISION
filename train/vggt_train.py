@@ -49,13 +49,15 @@ def main():
         args.seed, args.dataset_type
     )
 
+    train_neg_ratio = args.max_neg_ratio if not args.keep_all_data else -1.0
+
     train_loader, val_loader, train_ds, val_ds, meta = build_dataloaders(
         dataset_type=args.dataset_type,
         batch_size=args.batch_size,
         num_workers=4,
         train_ratio=effective_train_ratio,
         seed=args.seed,
-        max_neg_ratio=(args.max_neg_ratio if not args.keep_all_data else -1.0),
+        max_neg_ratio=train_neg_ratio,
         hard_neg_ratio=args.hard_neg_ratio,
         hard_neg_rel_thr=0.3,
         layer_mode=args.layer_mode,

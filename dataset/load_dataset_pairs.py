@@ -500,7 +500,9 @@ def build_dataloaders_pairs(
 
     Important change: we now split at the *meta* level and then only load the
     requested subset(s), so heavy arrays for the unused split are never loaded.
-    Deterministic splits can be persisted/loaded via split_index_path.
+    Deterministic splits can be persisted/loaded via split_index_path. Validation
+    negatives are never subsampled so evaluation metrics remain comparable when
+    shrinking the train set.
     """
     if dataset_type == "hm3d":
         pred_root = "data/predictions_feat/hvgg"
@@ -565,7 +567,7 @@ def build_dataloaders_pairs(
     )
     val_ds = EdgePairDatasetPairs(
         val_graphs,
-        max_neg_ratio=max_neg_ratio,
+        max_neg_ratio=-1.0,  # Never subsample negatives for validation
         hard_neg_ratio=hard_neg_ratio,
         hard_neg_rel_thr=hard_neg_rel_thr,
         layer_mode=layer_mode,
@@ -716,7 +718,7 @@ def build_dataloaders_pairs_cross(
     )
     val_ds = EdgePairDatasetPairs(
         eval_graphs_val,
-        max_neg_ratio=max_neg_ratio,
+        max_neg_ratio=-1.0,
         hard_neg_ratio=hard_neg_ratio,
         hard_neg_rel_thr=hard_neg_rel_thr,
         layer_mode=layer_mode,

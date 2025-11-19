@@ -31,6 +31,8 @@ def _default_pairview_split_path(seed: int, dataset_type: str) -> str:
 
 def _build_pairview_dataloaders(args):
     """Build dataloaders for pair-view training, optionally mixing train/eval datasets."""
+    train_neg_ratio = args.max_neg_ratio if not args.keep_all_data else -1.0
+
     if args.eval_dataset_type is not None and args.eval_dataset_type != args.dataset_type:
         train_dataset_type = args.dataset_type
         eval_dataset_type = args.eval_dataset_type
@@ -51,7 +53,7 @@ def _build_pairview_dataloaders(args):
             seed=args.seed,
             num_workers=4,
             train_ratio=train_ratio_train,
-            max_neg_ratio=(args.max_neg_ratio if not args.keep_all_data else -1.0),
+            max_neg_ratio=train_neg_ratio,
             hard_neg_ratio=args.hard_neg_ratio,
             hard_neg_rel_thr=0.3,
             layer_mode=args.layer_mode,
@@ -68,7 +70,7 @@ def _build_pairview_dataloaders(args):
             seed=args.seed,
             num_workers=4,
             train_ratio=eval_ratio_eval,
-            max_neg_ratio=(args.max_neg_ratio if not args.keep_all_data else -1.0),
+            max_neg_ratio=train_neg_ratio,
             hard_neg_ratio=args.hard_neg_ratio,
             hard_neg_rel_thr=0.3,
             layer_mode=args.layer_mode,
@@ -91,7 +93,7 @@ def _build_pairview_dataloaders(args):
         seed=args.seed,
         num_workers=4,
         train_ratio=default_train_ratio,
-        max_neg_ratio=(args.max_neg_ratio if not args.keep_all_data else -1.0),
+        max_neg_ratio=train_neg_ratio,
         hard_neg_ratio=args.hard_neg_ratio,
         hard_neg_rel_thr=0.3,
         layer_mode=args.layer_mode,

@@ -543,7 +543,7 @@ def build_dataloaders(
     Discover all (scene_version, split) graphs, deterministically split at the meta level,
     and then load only the requested subset(s). This avoids loading heavy arrays for the
     unused split and guarantees reproducible splits with the same seed/ratio, optionally
-    persisted to disk.
+    persisted to disk. Validation negatives are never subsampled so metrics stay comparable.
     """
     # 1) Set PRED_ROOT based on dataset_type
     global PRED_ROOT
@@ -659,7 +659,7 @@ def build_dataloaders(
     )
     val_ds = EdgePairDataset(
         val_graphs,
-        max_neg_ratio=max_neg_ratio,
+        max_neg_ratio=-1.0,  # Never subsample negatives on validation
         hard_neg_ratio=hard_neg_ratio,
         hard_neg_rel_thr=hard_neg_rel_thr,
         layer_mode=layer_mode,
