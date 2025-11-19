@@ -12,6 +12,7 @@ from typing import Dict, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
 # Add the main folder to the Python path
 import sys
@@ -79,9 +80,11 @@ def run_epoch(
         torch.cuda.empty_cache()
 
     grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
+    loop_desc = "Train" if is_train else "Eval"
+    progress = tqdm(loader, desc=loop_desc, leave=False)
 
     with grad_ctx:
-        for step, batch in enumerate(loader, start=1):
+        for step, batch in enumerate(progress, start=1):
             images = batch["images"].to(model.device, non_blocking=True)
             labels = batch["label"].to(model.device, non_blocking=True).view(-1)
 
@@ -105,11 +108,13 @@ def run_epoch(
 
             if is_train and log_every > 0 and step % log_every == 0:
                 avg_loss = total_loss / max(1, total_samples)
+                progress.set_postfix(loss=f"{avg_loss:.4f}")
                 print(f"[TRAIN] step={step} loss={avg_loss:.4f}")
 
             if max_steps > 0 and step >= max_steps:
                 break
 
+    progress.close()
     avg_loss = total_loss / max(1, total_samples)
 
     if all_probs:
@@ -191,15 +196,13 @@ def main():
     sample = train_dataset[0]
     with torch.no_grad():
         _ = model(sample["images"].unsqueeze(0).to(model.device))
-        
 
-    # Print parameteres and number of trainable parameters
-    total_params = 0
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            param_count = param.numel()
-            total_params += param_count
-            print(f"[PARAM] {name}: {param_count} trainable parameters")
+    total_params = sum(p.numel() for p in model.parameters())
+    head_params = sum(p.numel() for p in model.head.parameters()) if model.head is not None else 0
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[PARAM] Total parameters (VGGT + head): {total_params:,}")
+    print(f"[PARAM] Head parameters only: {head_params:,}")
+    print(f"[PARAM] Trainable parameters: {trainable_params:,}")
 
     optimizer = torch.optim.AdamW(
         model.head_parameters(),
