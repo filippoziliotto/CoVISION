@@ -6,6 +6,11 @@ import argparse
 import os
 import sys
 from typing import List
+from copy import deepcopy
+
+# Default output root for multiview probe experiments
+OUTPUT_ROOT = os.path.join(os.path.dirname(__file__), "outputs", "multiview")
+os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
 
 def _default_multiview_split_path(seed: int, dataset_type: str, train_ratio: float) -> str:
@@ -113,6 +118,12 @@ def train_layerwise_probes(
 ):
     num_layers = trainer.num_layers
 
+    best_val_loss = float("inf")
+    best_epoch = -1
+    best_layer_best_iou = None
+    best_layer_auc = None
+    best_state_dict = None
+
     for epoch in range(1, num_epochs + 1):
         trainer.probes.train()
         epoch_loss = 0.0
@@ -138,9 +149,21 @@ def train_layerwise_probes(
             trainer.probes.eval()
             all_preds_per_layer = [[] for _ in range(num_layers)]
             all_labels_per_layer = [[] for _ in range(num_layers)]
+            val_loss_sum = 0.0
+            val_total = 0
             with torch.no_grad():
                 for batch in val_loader:
-                    feat_i, feat_j, lbl, _ = batch
+                    # Allow datasets that optionally return scene/view ids:
+                    # (feat_i, feat_j, lbl, strength[, scene_id, view_i, view_j])
+                    if len(batch) >= 7:
+                        feat_i, feat_j, lbl, _, scene_id, view_i, view_j = batch[:7]
+                    else:
+                        feat_i, feat_j, lbl, _ = batch
+                        # Fallback: dummy ids if dataset does not provide them
+                        scene_id = torch.full_like(lbl, -1)
+                        view_i = torch.full_like(lbl, -1)
+                        view_j = torch.full_like(lbl, -1)
+
                     feat_i = feat_i.to(device)
                     feat_j = feat_j.to(device)
                     labels = lbl.to(device)
@@ -151,8 +174,12 @@ def train_layerwise_probes(
                         feat_b = feats[:, 1, 0, :]
                         pair_feat = build_pair_features(feat_a, feat_b)
                         preds = trainer.probes[layer_idx](pair_feat).squeeze(-1)
+                        loss = trainer.bce(preds, labels.float())
+                        val_loss_sum += loss.item() * labels.size(0)
                         all_preds_per_layer[layer_idx].append(preds.detach().cpu())
                         all_labels_per_layer[layer_idx].append(labels.detach().cpu())
+                    val_total += labels.size(0)
+            val_loss = val_loss_sum / max(1, val_total * num_layers)
             for layer_idx in range(num_layers):
                 probs = torch.cat(all_preds_per_layer[layer_idx], dim=0).numpy()
                 labels_all = torch.cat(all_labels_per_layer[layer_idx], dim=0).numpy()
@@ -171,6 +198,115 @@ def train_layerwise_probes(
                 best_thr = float(thresholds[int(np.argmax(ious))])
                 graph_iou_auc = float(np.trapz(ious, thresholds))
                 print(f"[Epoch {epoch}] Layer {layer_idx}: val_acc={acc:.3f}, val_graph_iou_best={best_iou:.3f}, val_graph_iou_auc={graph_iou_auc:.3f}")
+                if layer_idx == 0:
+                    layer_best_iou = [best_iou]
+                    layer_graph_iou_auc = [graph_iou_auc]
+                else:
+                    layer_best_iou.append(best_iou)
+                    layer_graph_iou_auc.append(graph_iou_auc)
+            layer_best_iou = np.array(layer_best_iou)
+            layer_graph_iou_auc = np.array(layer_graph_iou_auc)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_epoch = epoch
+                best_layer_best_iou = layer_best_iou
+                best_layer_auc = layer_graph_iou_auc
+                best_state_dict = deepcopy(trainer.probes.state_dict())
+                print(f"New best epoch {epoch} with val_loss {val_loss:.4f}")
+
+    if best_state_dict is not None:
+        trainer.probes.load_state_dict(best_state_dict)
+
+    if best_epoch == -1:
+        return None
+    else:
+        return {
+            "best_epoch": best_epoch,
+            "best_val_loss": best_val_loss,
+            "best_layer_best_iou": best_layer_best_iou,
+            "best_layer_auc": best_layer_auc,
+        }
+
+
+def save_val_predictions(
+    trainer: LayerwiseProbeTrainer,
+    val_loader: DataLoader,
+    device: str,
+    output_path: str,
+):
+    """
+    Run the trained probes on the validation loader and save per-pair, per-layer
+    probabilities and labels (and optional scene/view ids) to `output_path`.
+
+    The saved file is a compressed npz with keys:
+        - 'probs':  [N_pairs, num_layers]
+        - 'labels': [N_pairs]
+        - 'scene':  [N_pairs]  (or -1 if not provided by the dataset)
+        - 'view_i': [N_pairs]  (or -1)
+        - 'view_j': [N_pairs]  (or -1)
+    """
+    if val_loader is None or len(val_loader) == 0:
+        return
+
+    trainer.probes.eval()
+    num_layers = trainer.num_layers
+
+    all_probs = []
+    all_labels = []
+    all_scene = []
+    all_view_i = []
+    all_view_j = []
+
+    with torch.no_grad():
+        for batch in val_loader:
+            # Allow datasets that optionally return scene/view ids:
+            # (feat_i, feat_j, lbl, strength[, scene_id, view_i, view_j])
+            if len(batch) >= 7:
+                feat_i, feat_j, lbl, _, scene_id, view_i, view_j = batch[:7]
+            else:
+                feat_i, feat_j, lbl, _ = batch
+                # Fallback: dummy ids if dataset does not provide them
+                scene_id = torch.full_like(lbl, -1)
+                view_i = torch.full_like(lbl, -1)
+                view_j = torch.full_like(lbl, -1)
+
+            feat_i = feat_i.to(device)
+            feat_j = feat_j.to(device)
+            labels = lbl.to(device)
+
+            features_all = _pair_batch_to_layer_list(feat_i, feat_j)
+            # Compute per-layer probabilities: [B, num_layers]
+            batch_probs_layers = []
+            for layer_idx in range(num_layers):
+                feats = features_all[layer_idx]  # [B, 2, 1, E]
+                feat_a = feats[:, 0, 0, :]
+                feat_b = feats[:, 1, 0, :]
+                pair_feat = build_pair_features(feat_a, feat_b)
+                preds = trainer.probes[layer_idx](pair_feat).squeeze(-1)  # [B]
+                batch_probs_layers.append(preds.detach().cpu().numpy())
+            batch_probs_layers = np.stack(batch_probs_layers, axis=1)  # [B, L]
+
+            all_probs.append(batch_probs_layers)
+            all_labels.append(labels.detach().cpu().numpy())
+            all_scene.append(scene_id.detach().cpu().numpy())
+            all_view_i.append(view_i.detach().cpu().numpy())
+            all_view_j.append(view_j.detach().cpu().numpy())
+
+    probs = np.concatenate(all_probs, axis=0)
+    labels = np.concatenate(all_labels, axis=0)
+    scene = np.concatenate(all_scene, axis=0)
+    view_i_all = np.concatenate(all_view_i, axis=0)
+    view_j_all = np.concatenate(all_view_j, axis=0)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    np.savez_compressed(
+        output_path,
+        probs=probs,
+        labels=labels,
+        scene=scene,
+        view_i=view_i_all,
+        view_j=view_j_all,
+    )
 
 
 # ---------------------------------------------------------
@@ -195,6 +331,11 @@ def main():
     parser.add_argument("--split_index_path", type=str, default="")
     parser.add_argument("--persist_split_index", action="store_true")
     args = parser.parse_args()
+
+    # Define a run-specific output directory under OUTPUT_ROOT
+    run_name = f"{args.dataset_type}_{args.emb_mode}_seed{args.seed}_{args.split_mode}"
+    output_dir = os.path.join(OUTPUT_ROOT, run_name)
+    os.makedirs(output_dir, exist_ok=True)
 
     # Add repo root to sys.path
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -245,13 +386,39 @@ def main():
         device=device,
     )
 
-    train_layerwise_probes(
+    train_stats = train_layerwise_probes(
         trainer=trainer,
         train_loader=train_loader,
         val_loader=val_loader,
         num_epochs=args.num_epochs,
         device=device,
     )
+
+    # Save trained probes' weights
+    probes_path = os.path.join(output_dir, "probes.pth")
+    torch.save(trainer.probes.state_dict(), probes_path)
+    print(f"Saved probes to {probes_path}")
+
+    # Save validation predictions for post-hoc graph-level analysis
+    val_preds_path = os.path.join(output_dir, "val_predictions.npz")
+    save_val_predictions(
+        trainer=trainer,
+        val_loader=val_loader,
+        device=device,
+        output_path=val_preds_path,
+    )
+    print(f"Saved validation predictions to {val_preds_path}")
+
+    if train_stats is not None:
+        best_weights_path = os.path.join(output_dir, "best_layer_weights.npz")
+        np.savez_compressed(
+            best_weights_path,
+            best_epoch=train_stats["best_epoch"],
+            best_val_loss=train_stats["best_val_loss"],
+            best_layer_best_iou=train_stats["best_layer_best_iou"],
+            best_layer_auc=train_stats["best_layer_auc"],
+        )
+        print(f"Saved best layer weights and metrics to {best_weights_path}")
 
 
 if __name__ == "__main__":

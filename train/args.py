@@ -224,7 +224,7 @@ def build_multiview_parser() -> argparse.ArgumentParser:
         "--head_type",
         type=str,
         default="edge",
-        choices=["edge", "gated", "attention"],
+        choices=["edge", "gated", "attention", "weighted_edge"],
         help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
     )
     parser.add_argument(
@@ -448,7 +448,7 @@ def build_pairview_parser() -> argparse.ArgumentParser:
         "--head_type",
         type=str,
         default="edge",
-        choices=["edge", "gated", "attention"],
+        choices=["edge", "gated", "attention", "weighted_edge"],
         help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
     )
     parser.add_argument(

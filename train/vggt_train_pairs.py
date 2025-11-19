@@ -9,7 +9,7 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataset.load_dataset_pairs import build_dataloaders_pairs
-from models.PairView import EdgeClassifier, GatedLayerFusion, AttentiveLayerFusion
+from models.PairView import EdgeClassifier, GatedLayerFusion, AttentiveLayerFusion, ProbeWeightedEdgeClassifier
 from train.args import build_pairview_parser
 from train.trainer import Trainer, infer_embedding_dim
 from utils.utils import create_run_logger, set_seed, setup_wandb
