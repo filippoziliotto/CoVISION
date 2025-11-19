@@ -119,6 +119,11 @@ def build_multiview_parser() -> argparse.ArgumentParser:
         help="If set, add auxiliary regression loss to continuous edge strengths (rel_mat).",
     )
     parser.add_argument(
+        "--use_low_entropy_loss",
+        action="store_true",
+        help="If set, add a low-entropy regularization term on layer gates (for attention heads).",
+    )
+    parser.add_argument(
         "--reg_lambda",
         type=float,
         default=0.3,
@@ -224,7 +229,7 @@ def build_multiview_parser() -> argparse.ArgumentParser:
         "--head_type",
         type=str,
         default="edge",
-        choices=["edge", "gated", "attention", "weighted_edge"],
+        choices=["edge", "gated", "attention", "attention_entropy"],
         help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
     )
     parser.add_argument(
@@ -330,6 +335,11 @@ def build_pairview_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--use_reg_loss",
         action="store_true",
+    )
+    parser.add_argument(
+        "--use_low_entropy_loss",
+        action="store_true",
+        help="If set, add a low-entropy regularization term on layer gates (for attention heads).",
     )
     parser.add_argument(
         "--reg_lambda",

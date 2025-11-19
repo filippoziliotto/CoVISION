@@ -47,6 +47,8 @@ def train_epoch(
     rank_lambda: float = 0.1,
     rank_margin: float = 0.1,
     rank_num_samples: int = 1024,
+    use_low_entropy_loss: bool = False,
+    low_entropy_lambda: float = 0.01,
 ) -> Dict[str, float]:
     """Single training epoch shared by multi-view and pair-view trainers."""
     classifier.train()
@@ -56,6 +58,7 @@ def train_epoch(
     accs, f1s = [], []
     total_soft_iou = 0.0
 
+    entropy_mean = torch.tensor(0.0)  # placeholder, updated if used
     for batch_idx, batch in enumerate(tqdm(train_loader, desc="Training Progress")):
         if len(batch) == 3:
             feat_i, feat_j, labels = batch
@@ -124,6 +127,20 @@ def train_epoch(
         else:
             loss_rank = torch.tensor(0.0, device=preds.device)
 
+        # Low-entropy regularization on layer gates (for attention-style heads)
+        if use_low_entropy_loss and isinstance(out, dict) and "gate_alpha" in out:
+            gate_alpha = out["gate_alpha"]
+            if gate_alpha is not None:
+                # gate_alpha: (B, L); encourage low entropy across layers
+                # clamp to avoid log(0)
+                alpha = gate_alpha.clamp_min(1e-8)
+                # entropy per sample: H(α) = -Σ α log α
+                entropy_per_sample = -(alpha * alpha.log()).sum(dim=1)
+                entropy_mean = entropy_per_sample.mean()
+                loss = loss + low_entropy_lambda * entropy_mean
+        else:
+            entropy_mean = torch.tensor(0.0, device=preds.device)
+
         optimizer.zero_grad()
         loss.backward()
 
@@ -148,7 +165,13 @@ def train_epoch(
     else:
         avg_soft_iou = float("nan")
 
-    return dict(loss=avg_loss, acc=avg_acc, f1=avg_f1, soft_iou=avg_soft_iou)
+    return dict(
+        loss=avg_loss,
+        acc=avg_acc,
+        f1=avg_f1,
+        soft_iou=avg_soft_iou,
+        low_entropy=entropy_mean.item() if isinstance(entropy_mean, torch.Tensor) else float("nan"),
+    )
 
 
 @torch.no_grad()
@@ -565,6 +588,8 @@ class Trainer:
                 rank_lambda=args.rank_lambda,
                 rank_margin=args.rank_margin,
                 rank_num_samples=args.rank_num_samples,
+                use_low_entropy_loss=args.use_low_entropy_loss,
+                low_entropy_lambda=0.01,
             )
             train_eval_metrics = eval_epoch(
                 classifier,

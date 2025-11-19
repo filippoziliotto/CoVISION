@@ -190,3 +190,80 @@ class AttentiveLayerFusion(nn.Module):
         fused = 0.5 * (cls_out + pooled)                     # (B, H)
         logits = self.head(self.norm(fused)).squeeze(-1)       # (B,)
         return {"logits": logits}
+
+
+# ---------------------------------------------------------------------
+# EntropyAttentiveLayerFusion: returns gate_alpha for entropy regularization
+# ---------------------------------------------------------------------
+class EntropyAttentiveLayerFusion(nn.Module):
+    """
+    AttentiveLayerFusion head, but also returns per-layer gate distribution (alpha)
+    when in the multi-layer case, for entropy regularization.
+    """
+    def __init__(self, emb_dim, hidden_dim=256, vec_gate=False, num_heads=4, dropout_p=0.1):
+        super().__init__()
+        D = 4 * emb_dim  # concat [ei, ej, |ei-ej|, ei*ej]
+
+        # Per-layer pair encoder
+        self.pair_ln = nn.LayerNorm(D)
+        self.pair_ff = nn.Sequential(
+            nn.Linear(D, hidden_dim), nn.GELU(),
+            nn.Dropout(dropout_p),
+            nn.Linear(hidden_dim, hidden_dim), nn.GELU(),
+        )
+
+        # Lightweight gating over layers (scalar score per layer)
+        self.gate_mlp = nn.Sequential(
+            nn.Linear(D, hidden_dim // 2), nn.GELU(),
+            nn.Linear(hidden_dim // 2, 1)
+        )
+
+        # Cross-layer attention with a learned [CLS] token
+        self.cls = nn.Parameter(torch.randn(1, 1, hidden_dim))
+        self.mha = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout_p, batch_first=True)
+
+        # Final head
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2), nn.GELU(),
+            nn.Dropout(dropout_p),
+            nn.Linear(hidden_dim // 2, 1)
+        )
+
+        # Temperature for gating softmax
+        self.tau = nn.Parameter(torch.tensor(1.0))
+
+    @staticmethod
+    def _pair_features(ei, ej):
+        return torch.cat([ei, ej, (ei - ej).abs(), ei * ej], dim=-1)
+
+    def forward(self, emb_i, emb_j):
+        # Single-layer case: (B, E)
+        if emb_i.ndim == 2:
+            z = self._pair_features(emb_i, emb_j)            # (B, 4E)
+            h = self.pair_ff(self.pair_ln(z))                 # (B, H)
+            logits = self.head(self.norm(h)).squeeze(-1)        # (B,)
+            return {"logits": logits}
+
+        # Multi-layer case: (B, L, E)
+        B, L, E = emb_i.shape
+
+        # Per-layer pair encoding
+        z = self._pair_features(emb_i, emb_j)                # (B, L, 4E)
+        H = self.pair_ff(self.pair_ln(z))                    # (B, L, H)
+
+        # Cross-layer attention via a learned [CLS]
+        cls = self.cls.expand(B, 1, -1)                      # (B, 1, H)
+        X = torch.cat([cls, H], dim=1)                       # (B, 1+L, H)
+        X_out, _ = self.mha(X, X, X, need_weights=False)
+        cls_out = X_out[:, 0]                                # (B, H)
+
+        # Gated pooling across layers (softmax on scalar gates)
+        gate_scores = self.gate_mlp(z).squeeze(-1)           # (B, L)
+        alpha = torch.softmax(gate_scores / (self.tau.abs() + 1e-6), dim=1)  # (B, L)
+        pooled = (alpha.unsqueeze(-1) * H).sum(dim=1)        # (B, H)
+
+        # Fuse CLS-attended summary and gated pooling
+        fused = 0.5 * (cls_out + pooled)                     # (B, H)
+        logits = self.head(self.norm(fused)).squeeze(-1)       # (B,)
+        return {"logits": logits, "gate_alpha": alpha}

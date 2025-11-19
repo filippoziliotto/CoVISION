@@ -9,7 +9,7 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataset.load_dataset import build_dataloaders
-from models.MultiView import EdgeClassifier, GatedLayerFusion, ProbeWeightedEdgeClassifier
+from models.MultiView import EdgeClassifier, GatedLayerFusion, EntropyAttentiveLayerFusion, AttentiveLayerFusion
 from train.args import build_multiview_parser
 from train.trainer import Trainer, infer_embedding_dim
 from utils.utils import create_run_logger, set_seed, setup_wandb
@@ -106,13 +106,18 @@ def main():
                 hidden_dim=args.hidden_dim,
                 vec_gate=False,
             ).to(device)
-        elif args.head_type == "weighted_edge":
-            classifier = ProbeWeightedEdgeClassifier(
+        elif args.head_type == "attention":
+            classifier = AttentiveLayerFusion(
+                emb_dim=emb_dim,
+                hidden_dim=args.hidden_dim,
+            ).to(device).to(device)
+        elif args.head_type == "attention_entropy":
+            classifier = EntropyAttentiveLayerFusion(
                 emb_dim=emb_dim,
                 hidden_dim=args.hidden_dim,
             ).to(device)
         else:
-            raise ValueError(f"Unknown head_type '{args.head_type}'. Expected 'edge' or 'gated'.")
+            raise ValueError(f"Unknown head_type '{args.head_type}'. Expected 'edge', 'gated', 'attention', or 'weighted_edge'.")
 
         n_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)
         logger.log(f"[INFO] Trainable parameters: {n_params}")
