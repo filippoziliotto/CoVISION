@@ -9,7 +9,12 @@ import torch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataset.load_dataset_pairs import build_dataloaders_pairs
-from models.PairView import EdgeClassifier, GatedLayerFusion, AttentiveLayerFusion
+from models.PairView import (
+    EdgeClassifier,
+    GatedLayerFusion,
+    AttentiveLayerFusion,
+    EntropyAttentiveLayerFusion,
+)
 from train.args import build_pairview_parser
 from train.trainer import Trainer, infer_embedding_dim
 from utils.utils import create_run_logger, set_seed, setup_wandb
@@ -183,9 +188,14 @@ def main():
                 emb_dim=emb_dim,
                 hidden_dim=args.hidden_dim,
             ).to(device)
+        elif args.head_type == "attention_entropy":
+            classifier = EntropyAttentiveLayerFusion(
+                emb_dim=emb_dim,
+                hidden_dim=args.hidden_dim,
+            ).to(device)
         else:
             raise ValueError(
-                f"Unknown head_type '{args.head_type}'. Expected 'edge', 'gated', or 'attention'."
+                f"Unknown head_type '{args.head_type}'. Expected 'edge', 'gated', 'attention', or 'attention_entropy'."
             )
 
         n_params = sum(p.numel() for p in classifier.parameters() if p.requires_grad)

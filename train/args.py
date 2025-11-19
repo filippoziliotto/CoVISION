@@ -458,8 +458,8 @@ def build_pairview_parser() -> argparse.ArgumentParser:
         "--head_type",
         type=str,
         default="edge",
-        choices=["edge", "gated", "attention", "weighted_edge"],
-        help="Which classifier head to use: 'edge' (EdgeClassifier) or 'gated' (GatedLayerFusion).",
+        choices=["edge", "gated", "attention", "attention_entropy"],
+        help="Which classifier head to use: 'edge', 'gated', 'attention', or 'attention_entropy'.",
     )
     parser.add_argument(
         "--hidden_dim",
