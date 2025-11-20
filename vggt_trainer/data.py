@@ -40,6 +40,9 @@ class PairRecord:
     img_j: str
     label: float
     strength: float
+    depth_path: Optional[str] = None
+    depth_idx_i: Optional[int] = None
+    depth_idx_j: Optional[int] = None
 
 
 def _default_train_ratio(dataset_type: str, override: Optional[float]) -> float:
@@ -183,6 +186,8 @@ def _load_pairs_for_split(
         return []
 
     rel_mat = _load_rel_matrix(saved_obs)
+    depth_path = os.path.join(saved_obs, "saved_dep.npy")
+    has_depth = os.path.isfile(depth_path)
     img_files = sorted(f for f in os.listdir(saved_obs) if f.endswith(".png"))
     name_to_idx = {f: idx for idx, f in enumerate(img_files)}
 
@@ -217,6 +222,9 @@ def _load_pairs_for_split(
                     img_j=path_j,
                     label=label,
                     strength=strength,
+                    depth_path=depth_path if has_depth else None,
+                    depth_idx_i=idx_i if has_depth else None,
+                    depth_idx_j=idx_j if has_depth else None,
                 )
             )
 
@@ -306,6 +314,7 @@ class PairImageDataset(Dataset):
         self.pairs = pairs
         self.preprocess_mode = preprocess_mode
         self.square_size = square_size
+        self._depth_cache = {}
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -317,12 +326,28 @@ class PairImageDataset(Dataset):
             preprocess_mode=self.preprocess_mode,
             square_size=self.square_size,
         )
+        depths = None
+        if record.depth_path and os.path.isfile(record.depth_path):
+            depth_arr = self._depth_cache.get(record.depth_path)
+            if depth_arr is None:
+                depth_arr = np.load(record.depth_path, allow_pickle=False)
+                self._depth_cache[record.depth_path] = depth_arr
+            if (
+                record.depth_idx_i is not None
+                and record.depth_idx_j is not None
+                and depth_arr.ndim >= 3
+                and max(record.depth_idx_i, record.depth_idx_j) < depth_arr.shape[0]
+            ):
+                depth_i = torch.from_numpy(depth_arr[record.depth_idx_i]).float()
+                depth_j = torch.from_numpy(depth_arr[record.depth_idx_j]).float()
+                depths = torch.stack([depth_i, depth_j], dim=0)
         return {
             "images": images,
             "label": torch.tensor(record.label, dtype=torch.float32),
             "strength": torch.tensor(record.strength, dtype=torch.float32),
             "scene_version": record.scene_version,
             "split_id": record.split_id,
+            "depths": depths,
         }
 
 
@@ -343,7 +368,8 @@ def build_image_pair_dataloaders(
     train_meta, val_meta, stats = _split_meta(split_meta, seed, train_ratio, split_mode)
 
     train_pairs = _load_pairs_for_meta(train_meta, max_pairs_per_split, seed)
-    val_pairs = _load_pairs_for_meta(val_meta, max_pairs_per_split, seed + 1) if val_meta else []
+    # Keep validation untouched: do not subsample pairs for held-out metrics.
+    val_pairs = _load_pairs_for_meta(val_meta, -1, seed + 1) if val_meta else []
 
     train_dataset = PairImageDataset(
         train_pairs, preprocess_mode=preprocess_mode, square_size=square_size

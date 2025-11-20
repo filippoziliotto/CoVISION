@@ -4,7 +4,7 @@ VGGT backbone + lightweight classification head that is optimised directly on RG
 """
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Sequence, Union
+from typing import Dict, Iterable, List, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
@@ -280,6 +280,53 @@ class VGGTHeadModel(nn.Module):
         self._init_head_if_needed(emb_dim=emb_i.shape[-1])
         logits = self.head(emb_i, emb_j)["logits"]
         return {"logits": logits}
+
+    @torch.no_grad()
+    def forward_features(self, images: torch.Tensor, select_layers: bool = True) -> Dict[str, torch.Tensor]:
+        """
+        Run the frozen VGGT backbone and return per-layer, per-view embeddings
+        before the classification head.
+
+        Args:
+            images: (B, S, 3, H, W) tensor or (S, 3, H, W) with S expected to be 2.
+            select_layers: whether to apply layer selection (layer_mode) before
+                returning the embeddings.
+
+        Returns:
+            {
+                "embeddings": (B, L, S, D),
+                "emb_i": (B, L, D) or (B, D) if a single layer is selected,
+                "emb_j": same shape as emb_i,
+            }
+        """
+
+        if images.dim() == 4:
+            images = images.unsqueeze(0)
+        if images.size(1) != 2:
+            raise ValueError(f"VGGTHeadModel expects exactly 2 views, got {images.size(1)}.")
+        images = images.to(self.device)
+
+        predictions = self.backbone(images, extract_features=True)
+        if "features_all" not in predictions:
+            raise RuntimeError("VGGT outputs do not include 'features_all'.")
+
+        raw_layers = [feat.detach() for feat in predictions["features_all"]]
+        embeddings = self._compute_layer_embeddings(raw_layers)
+        if select_layers:
+            embeddings = self._select_layers(embeddings)
+
+        emb_i = embeddings[:, :, 0, :]
+        emb_j = embeddings[:, :, 1, :]
+
+        if emb_i.shape[1] == 1:
+            emb_i = emb_i[:, 0, :]
+            emb_j = emb_j[:, 0, :]
+
+        return {
+            "embeddings": embeddings,
+            "emb_i": emb_i,
+            "emb_j": emb_j,
+        }
 
     def head_parameters(self) -> Iterable[torch.nn.Parameter]:
         params: List[nn.Parameter] = []
