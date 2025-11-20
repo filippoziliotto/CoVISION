@@ -618,6 +618,15 @@ def build_dataloaders_pairs(
         f"train={meta['num_train_scenes']}, val={meta['num_val_scenes']}"
     )
     print(f"[INFO] Pair embedding dim: {meta['emb_dim']}")
+    
+    # Check a batch of the dataloaders
+    if len(train_loader) > 0:
+        batch = next(iter(train_loader))
+        print(
+            f"[INFO] Sample train batch: "
+            f"feat_i={batch[0].shape}, feat_j={batch[1].shape}, "
+            f"labels={batch[2].shape}, strengths={batch[3].shape}"
+        )
 
     return train_loader, val_loader, train_ds, val_ds, meta
 

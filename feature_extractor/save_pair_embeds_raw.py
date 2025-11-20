@@ -261,7 +261,8 @@ def main():
     parser.add_argument(
         "--base_root",
         type=str,
-        default=_abs_path("data/vast/cc7287/gvgg-1"),
+        # default=_abs_path("data/vast/cc7287/gvgg-1"),
+        default=_abs_path("data/scratch/cc7287/mvdust3r_projects/HM3D/dust3r_vpr_mask/data/hvgg"),
         help="Base root for Gibson (e.g. data/vast/cc7287/gvgg-1) or HM3D hvgg root.",
     )
     parser.add_argument(
