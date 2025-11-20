@@ -2,8 +2,8 @@
 """
 Extract per-layer VGGT embeddings for all images in each split and store them
 as compressed Zarr arrays. This mirrors feature_extractor/save_embeds.py but
-aligns with the newer dataset discovery and saving style used by
-save_pair_embeds.py.
+uses the same forward-feature pipeline as save_pair_embeds_raw.py (no pooling
+modes), yielding the token-summarised embeddings directly from VGGT.
 """
 import os
 import sys
@@ -28,8 +28,7 @@ sys.path.append(str(REPO_ROOT))
 sys.path.append(str(REPO_ROOT / "vggt"))
 
 from feature_extractor.save_pair_embeds import discover_scene_splits, _abs_path
-from feature_extractor.save_embeds import make_image_embeddings
-from vggt.vggt.models.vggt import VGGT
+from vggt_trainer.model import VGGTHeadModel
 from vggt.vggt.utils.load_fn import load_and_preprocess_images
 
 
@@ -81,15 +80,15 @@ def save_embeds_to_zarr(out_path: str, all_emb: np.ndarray, last_emb: np.ndarray
 
 
 def process_scene_split(
-    model: VGGT,
+    model: VGGTHeadModel,
     device: torch.device,
     scene_version: str,
     split_id: str,
     saved_obs: str,
-    mode: str,
 ) -> None:
     """
     Extract embeddings for all images in a (scene_version, split_id) and save to Zarr.
+    Embeddings are produced via VGGTHeadModel's token summarization pipeline (no pooling modes).
     """
 
     img_files = sorted(f for f in os.listdir(saved_obs) if f.endswith(".png"))
@@ -101,7 +100,7 @@ def process_scene_split(
 
     out_dir = os.path.join(PRED_ROOT, scene_version, f"split_{split_id}", "embs")
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"embs_raw_{mode}.zarr")
+    out_path = os.path.join(out_dir, "embs_raw.zarr")
 
     if os.path.exists(out_path):
         print(f"[INFO] Embeddings already exist for {scene_version} split {split_id}, skipping.")
@@ -113,24 +112,22 @@ def process_scene_split(
         print(f"[WARN] Failed to load/preprocess images for {scene_version} split {split_id}: {e}")
         return
 
+    # VGGT expects a batch dimension; wrap all images as one sequence of views.
+    if images_pre.dim() == 4:
+        images_pre = images_pre.unsqueeze(0)
+
     with torch.no_grad():
-        preds = model(images_pre, extract_features=True)
+        preds = model.backbone(images_pre, extract_features=True)
 
     if "features_all" not in preds:
         print(f"[WARN] VGGT outputs missing 'features_all' for {scene_version} split {split_id}, skipping.")
         return
 
-    feat_layers = preds["features_all"]
-    layer_embs: List[np.ndarray] = []
-    for feats_layer in feat_layers:
-        emb = make_image_embeddings(feats_layer, mode=mode)
-        layer_embs.append(emb.cpu().numpy().astype(np.float32))
+    raw_layers = [feat.detach() for feat in preds["features_all"]]
+    embeddings = model._compute_layer_embeddings(raw_layers)  # (B, L, S, D)
+    embeddings = model._select_layers(embeddings)
 
-    if not layer_embs:
-        print(f"[WARN] No embeddings computed for {scene_version} split {split_id}, skipping.")
-        return
-
-    all_emb = np.stack(layer_embs, axis=0)  # (L, N, E)
+    all_emb = embeddings.squeeze(0).cpu().numpy().astype(np.float32)  # (L, N, D)
     last_emb = all_emb[-1]
     img_files_np = np.array(img_files)
 
@@ -147,7 +144,8 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Save per-layer VGGT embeddings (per image) into compressed Zarr stores "
-            "for each scene_version/split under a base root."
+            "for each scene_version/split under a base root, using the forward-feature "
+            "token summarization pipeline."
         )
     )
     parser.add_argument(
@@ -163,16 +161,40 @@ def main():
         help="Device for VGGT (e.g. cuda, mps, cpu). Default: auto",
     )
     parser.add_argument(
-        "--mode",
-        choices=["avg", "avg_max", "chunked"],
-        default="avg",
-        help="Aggregation mode passed to make_image_embeddings.",
-    )
-    parser.add_argument(
         "--max_scenes",
         type=int,
         default=-1,
         help="Optional cap on number of scene_versions to process (for debugging).",
+    )
+    parser.add_argument(
+        "--layer_mode",
+        type=str,
+        default="all",
+        help="Layer selection mode passed to VGGTHeadModel (e.g. all, last_stages, 2nd_last).",
+    )
+    parser.add_argument(
+        "--backbone_ckpt",
+        type=str,
+        default="facebook/VGGT-1B",
+        help="Backbone checkpoint identifier passed to VGGTHeadModel.",
+    )
+    parser.add_argument(
+        "--token_proj_dim",
+        type=int,
+        default=256,
+        help="Token projection dimension used before summarization.",
+    )
+    parser.add_argument(
+        "--summary_tokens",
+        type=int,
+        default=8,
+        help="Number of summary tokens per layer per view.",
+    )
+    parser.add_argument(
+        "--summary_heads",
+        type=int,
+        default=4,
+        help="Attention heads for token summarization.",
     )
     args = parser.parse_args()
 
@@ -197,10 +219,17 @@ def main():
     os.makedirs(PRED_ROOT, exist_ok=True)
     print(f"[INFO] Saving embeddings under: {PRED_ROOT}")
 
-    print("[INFO] Initializing VGGT...")
-    model = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
+    print("[INFO] Initializing VGGTHeadModel...")
+    model = VGGTHeadModel(
+        backbone_ckpt=args.backbone_ckpt,
+        device=device_str,
+        layer_mode=args.layer_mode,
+        token_proj_dim=args.token_proj_dim,
+        summary_tokens=args.summary_tokens,
+        summary_heads=args.summary_heads,
+    )
     model.eval()
-    print("[INFO] VGGT initialized.")
+    print("[INFO] VGGTHeadModel initialized.")
 
     scene_splits = discover_scene_splits(base_root)
     if not scene_splits:
@@ -219,7 +248,6 @@ def main():
             scene_version=meta["scene_version"],
             split_id=meta["split_id"],
             saved_obs=meta["saved_obs"],
-            mode=args.mode,
         )
 
 

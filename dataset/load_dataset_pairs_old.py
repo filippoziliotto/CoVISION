@@ -6,7 +6,6 @@ import json
 
 import numpy as np
 import torch
-import zarr
 from torch.utils.data import Dataset, DataLoader
 from sklearn.utils import shuffle as sk_shuffle
 import argparse
@@ -53,12 +52,14 @@ def _resolve_layer_indices(layer_mode: str, num_layers: int):
 # -------------------------------------------------------
 # Discover pair npz files under data/predictions_feat
 # -------------------------------------------------------
-def _discover_pair_graphs(pred_root: str = PRED_ROOT) -> List[Dict]:
+def _discover_pair_graphs(emb_mode: str = "avg", pred_root: str = PRED_ROOT) -> List[Dict]:
     """
-    Scan pred_root for all (scene_version, split_id) that have pair_embs/pairs_raw.zarr.
+    Scan pred_root for all (scene_version, split_id) that
+    have pair_embs/pairs_{emb_mode}.npz or fallback to pair_embs/pairs.npz.
 
-    Expected layout (only Zarr is supported now):
-        {pred_root}/{scene_version}/split_{split_id}/pair_embs/pairs_raw.zarr
+    Expected layout:
+        {pred_root}/{scene_version}/split_{split_id}/pair_embs/pairs_{emb_mode}.npz
+        (fallback: pairs.npz)
     """
     graphs = []
     if not os.path.isdir(pred_root):
@@ -78,10 +79,14 @@ def _discover_pair_graphs(pred_root: str = PRED_ROOT) -> List[Dict]:
 
             split_id = split_name.split("_", 1)[1]
             pair_dir = os.path.join(split_dir, "pair_embs")
-            pair_path_raw = os.path.join(pair_dir, "pairs_raw.zarr")
+            pair_path_mode = os.path.join(pair_dir, f"pairs_{emb_mode}.npz")
+            pair_path_fallback = os.path.join(pair_dir, "pairs.npz")
 
-            if os.path.isdir(pair_path_raw):
-                actual_pair_path = pair_path_raw
+            # Prefer pairs_{emb_mode}.npz, else fallback to pairs.npz, else skip
+            if os.path.isfile(pair_path_mode):
+                actual_pair_path = pair_path_mode
+            elif os.path.isfile(pair_path_fallback):
+                actual_pair_path = pair_path_fallback
             else:
                 continue
 
@@ -95,27 +100,10 @@ def _discover_pair_graphs(pred_root: str = PRED_ROOT) -> List[Dict]:
 
     if not graphs:
         raise RuntimeError(
-            f"No pair_embs/pairs_raw.zarr found under {pred_root}"
+            f"No pair_embs/pairs_{emb_mode}.npz or pairs.npz found under {pred_root}"
         )
 
     return graphs
-
-
-def _load_zarr_pair(path: str) -> Tuple[Tuple[int, ...], np.ndarray, np.ndarray]:
-    """Load only labels/strengths and get emb_i shape; avoid reading embeddings into RAM."""
-
-    grp = zarr.open_group(path, mode="r")
-    keys = set(grp.array_keys())
-    required = {"emb_i", "emb_j", "labels", "strengths"}
-    if not required.issubset(keys):
-        raise KeyError(
-            f"Zarr store at {path} missing required keys {sorted(required)}; found {sorted(keys)}"
-        )
-
-    emb_shape = grp["emb_i"].shape  # (P, L, E)
-    labels = np.array(grp["labels"][:], dtype=np.float32)
-    strengths = np.array(grp["strengths"][:], dtype=np.float32)
-    return emb_shape, labels, strengths
 
 
 # -------------------------------------------------------
@@ -123,26 +111,26 @@ def _load_zarr_pair(path: str) -> Tuple[Tuple[int, ...], np.ndarray, np.ndarray]
 # -------------------------------------------------------
 def _load_graphs_from_meta(meta_graphs: List[Dict]) -> List[Dict]:
     """
-    Given meta_graphs from _discover_pair_graphs, prepare lightweight graph info
-    without loading embeddings into memory. Labels/strengths are loaded for
-    sampling; embeddings are read lazily in the Dataset.
+    Given meta_graphs from _discover_pair_graphs, load the actual npz contents.
     """
     graphs = []
     for m in meta_graphs:
         scene_version = m["scene_version"]
         split_id = m["split_id"]
         pair_path = m["pair_path"]
-        base_scene = m.get("base_scene")
 
-        emb_shape, labels, strengths = _load_zarr_pair(pair_path)
+        data = np.load(pair_path, allow_pickle=False)
+        emb_i = data["emb_i"]          # (P, L, E) or (P, E)
+        emb_j = data["emb_j"]          # (P, L, E) or (P, E)
+        labels = data["labels"]        # (P,)
+        strengths = data["strengths"]  # (P,)
 
         graphs.append(
             dict(
                 scene_version=scene_version,
                 split_id=split_id,
-                base_scene=base_scene if base_scene is not None else scene_version.split("-")[0],
-                pair_path=pair_path,
-                emb_shape=emb_shape,
+                emb_i=emb_i,
+                emb_j=emb_j,
                 labels=labels,
                 strengths=strengths,
             )
@@ -230,6 +218,7 @@ def _write_split_index_pairs(
     train_ratio: float,
     split_mode: str,
     dataset_type: str,
+    emb_mode: str,
 ) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {
@@ -238,6 +227,7 @@ def _write_split_index_pairs(
             "train_ratio": train_ratio,
             "split_mode": split_mode,
             "dataset_type": dataset_type,
+            "emb_mode": emb_mode,
             "source": "load_dataset_pairs.py",
         },
         "train": [{"scene_version": m["scene_version"], "split_id": m["split_id"]} for m in train_meta],
@@ -308,14 +298,19 @@ def _split_graphs(
 
 
 # -------------------------------------------------------
-# Pair-level dataset from pairs_raw.zarr
+# Pair-level dataset from pairs.npz
 # -------------------------------------------------------
 class EdgePairDatasetPairs(Dataset):
     """
-    Dataset built directly from precomputed pair embeddings stored in Zarr.
+    Dataset built directly from precomputed pair embeddings.
 
-    Embeddings are read lazily from disk in __getitem__ to avoid loading the
-    full tensor into RAM. Labels/strengths are loaded once for sampling.
+    Each graph corresponds to one (scene_version, split_id) with:
+        emb_i:    (P, L, E) or (P, E)
+        emb_j:    (P, L, E) or (P, E)
+        labels:   (P,)
+        strengths:(P,)
+    We then build (feat_i, feat_j, label, strength) pairs with optional
+    negative subsampling and hard negative mining on strengths.
     """
 
     def __init__(
@@ -330,8 +325,8 @@ class EdgePairDatasetPairs(Dataset):
         graphs: list of dicts with keys:
           - "scene_version": str
           - "split_id": str
-          - "pair_path": path to pairs_raw.zarr
-          - "emb_shape": (P, L, E)
+          - "emb_i": (P, L, E) or (P, E)
+          - "emb_j": (P, L, E) or (P, E)
           - "labels": (P,)
           - "strengths": (P,)
         max_neg_ratio: float, maximum number of negatives to keep per positive (ratio)
@@ -341,45 +336,80 @@ class EdgePairDatasetPairs(Dataset):
                                      "last_stages", "mid_to_last_stages"]
         """
         self.layer_mode = layer_mode
-        self.graphs = graphs
-        self.samples: List[Tuple[int, int]] = []  # (graph_idx, pair_idx)
-        self._stores: Dict[int, zarr.Group] = {}
-
+        self.pairs = []
         total_pos = 0
         total_neg = 0
 
-        for g_idx, g in enumerate(graphs):
+        for g in graphs:
             scene_version = g["scene_version"]
             split_id = g["split_id"]
+
+            emb_i = g["emb_i"].astype(np.float32)
+            emb_j = g["emb_j"].astype(np.float32)
             labels = g["labels"].astype(np.float32)
             strengths = g["strengths"].astype(np.float32)
 
-            P = labels.shape[0]
-            L = g["emb_shape"][1]
+            # Ensure shape (P, L, E)
+            if emb_i.ndim == 2:
+                # (P, E) -> (P, 1, E)
+                emb_i = emb_i[:, None, :]
+                emb_j = emb_j[:, None, :]
+            elif emb_i.ndim != 3:
+                raise ValueError(
+                    f"Expected emb_i with ndim 2 or 3, got {emb_i.shape} "
+                    f"for {scene_version} split {split_id}"
+                )
 
-            pos_indices = []
-            neg_indices_hard = []
-            neg_indices_easy = []
+            P, L, E = emb_i.shape
+
+            # Decide which layers to use
+            layer_indices = _resolve_layer_indices(self.layer_mode, L)
+
+            pos_pairs = []
+            neg_pairs_hard = []
+            neg_pairs_easy = []
 
             for p in range(P):
                 lbl = labels[p]
                 str_p = strengths[p]
 
-                if lbl == 1.0:
-                    pos_indices.append(p)
+                if layer_indices is None:
+                    # Use all layers: (L, E)
+                    feat_i = emb_i[p, :, :]  # (L, E)
+                    feat_j = emb_j[p, :, :]  # (L, E)
+                elif isinstance(layer_indices, int):
+                    # Single layer: (E,)
+                    feat_i = emb_i[p, layer_indices, :]  # (E,)
+                    feat_j = emb_j[p, layer_indices, :]  # (E,)
                 else:
-                    if str_p >= hard_neg_rel_thr:
-                        neg_indices_hard.append(p)
-                    else:
-                        neg_indices_easy.append(p)
+                    # Multiple layers: (L_sub, E)
+                    feat_i = emb_i[p, layer_indices, :]  # (L_sub, E)
+                    feat_j = emb_j[p, layer_indices, :]  # (L_sub, E)
 
-            num_pos = len(pos_indices)
-            num_neg_hard = len(neg_indices_hard)
-            num_neg_easy = len(neg_indices_easy)
+                triple = (
+                    feat_i.astype(np.float32),
+                    feat_j.astype(np.float32),
+                    float(lbl),
+                    float(str_p),
+                )
+
+                if lbl == 1.0:
+                    pos_pairs.append(triple)
+                else:
+                    # Negative: check hardness via strengths
+                    if str_p >= hard_neg_rel_thr:
+                        neg_pairs_hard.append(triple)
+                    else:
+                        neg_pairs_easy.append(triple)
+
+            # Compute and print per-graph statistics
+            num_pos = len(pos_pairs)
+            num_neg_hard = len(neg_pairs_hard)
+            num_neg_easy = len(neg_pairs_easy)
             num_neg_total = num_neg_hard + num_neg_easy
             print(
                 f"[DEBUG] Graph {scene_version} split {split_id}: "
-                f"P={P}, L={L}, pos={num_pos}, neg_hard={num_neg_hard}, "
+                f"P={P}, pos={num_pos}, neg_hard={num_neg_hard}, "
                 f"neg_easy={num_neg_easy}, neg_total={num_neg_total}"
             )
 
@@ -391,29 +421,31 @@ class EdgePairDatasetPairs(Dataset):
                 continue
 
             # Keep all positives
-            self.samples.extend((g_idx, p) for p in pos_indices)
+            self.pairs.extend(pos_pairs)
             total_pos += num_pos
 
+            # Negative subsampling
             if num_neg_total == 0:
                 continue
 
+            # If max_neg_ratio <= 0, keep all negatives (no subsampling)
             if max_neg_ratio <= 0:
-                sampled_neg = neg_indices_hard + neg_indices_easy
+                sampled_neg = neg_pairs_hard + neg_pairs_easy
             else:
                 k_total_neg = int(num_pos * max_neg_ratio)
                 k_total_neg = min(k_total_neg, num_neg_total)
                 if k_total_neg <= 0:
                     continue
 
-                k_hard = min(len(neg_indices_hard), int(k_total_neg * hard_neg_ratio))
+                k_hard = min(len(neg_pairs_hard), int(k_total_neg * hard_neg_ratio))
                 k_easy = k_total_neg - k_hard
 
                 sampled_neg = []
                 if k_hard > 0:
-                    sampled_neg.extend(random.sample(neg_indices_hard, k_hard))
-                if k_easy > 0 and len(neg_indices_easy) > 0:
-                    k_easy = min(k_easy, len(neg_indices_easy))
-                    sampled_neg.extend(random.sample(neg_indices_easy, k_easy))
+                    sampled_neg.extend(random.sample(neg_pairs_hard, k_hard))
+                if k_easy > 0 and len(neg_pairs_easy) > 0:
+                    k_easy = min(k_easy, len(neg_pairs_easy))
+                    sampled_neg.extend(random.sample(neg_pairs_easy, k_easy))
 
             kept_neg = len(sampled_neg)
             print(
@@ -421,54 +453,23 @@ class EdgePairDatasetPairs(Dataset):
                 f"kept={kept_neg} / total={num_neg_total}"
             )
 
-            self.samples.extend((g_idx, p) for p in sampled_neg)
+            self.pairs.extend(sampled_neg)
             total_neg += kept_neg
 
         print(
-            f"[INFO] EdgePairDatasetPairs: total pairs={len(self.samples)} "
+            f"[INFO] EdgePairDatasetPairs: total pairs={len(self.pairs)} "
             f"(pos={total_pos}, neg={total_neg}, "
             f"neg/pos={total_neg / max(1, total_pos):.2f})"
         )
 
     def __len__(self) -> int:
-        return len(self.samples)
-
-    def _get_store(self, graph_idx: int) -> zarr.Group:
-        if graph_idx not in self._stores:
-            path = self.graphs[graph_idx]["pair_path"]
-            self._stores[graph_idx] = zarr.open_group(path, mode="r")
-        return self._stores[graph_idx]
+        return len(self.pairs)
 
     def __getitem__(self, idx: int):
-        g_idx, p_idx = self.samples[idx]
-        g = self.graphs[g_idx]
-        store = self._get_store(g_idx)
-
-        emb_i = store["emb_i"][p_idx]  # (L, E)
-        emb_j = store["emb_j"][p_idx]  # (L, E)
-
-        if emb_i.ndim == 1:
-            emb_i = emb_i[None, :]
-            emb_j = emb_j[None, :]
-
-        L = emb_i.shape[0]
-        layer_indices = _resolve_layer_indices(self.layer_mode, L)
-        if layer_indices is None:
-            feat_i = emb_i
-            feat_j = emb_j
-        elif isinstance(layer_indices, int):
-            feat_i = emb_i[layer_indices]
-            feat_j = emb_j[layer_indices]
-        else:
-            feat_i = emb_i[layer_indices]
-            feat_j = emb_j[layer_indices]
-
-        lbl = float(g["labels"][p_idx])
-        strength = float(g["strengths"][p_idx])
-
+        feat_i, feat_j, lbl, strength = self.pairs[idx]
         return (
-            torch.from_numpy(feat_i.astype(np.float32)),
-            torch.from_numpy(feat_j.astype(np.float32)),
+            torch.from_numpy(feat_i),
+            torch.from_numpy(feat_j),
             torch.tensor(lbl, dtype=torch.float32),
             torch.tensor(strength, dtype=torch.float32),
         )
@@ -488,6 +489,7 @@ def build_dataloaders_pairs(
     hard_neg_rel_thr: float = 0.3,
     layer_mode: str = "1st_last",
     split_mode: str = "scene_disjoint",
+    emb_mode: str = "avg",
     subset: str = "both",                   # new: 'train' | 'val' | 'both'
     split_index_path: str = None,           # new: optional path to load/save deterministic split
     persist_split_index: bool = False,      # new: if True and split_index_path is set, write it when missing
@@ -511,7 +513,7 @@ def build_dataloaders_pairs(
     np.random.seed(seed)
 
     # 1) Discover all pair graphs (meta only)
-    meta_graphs = _discover_pair_graphs(pred_root=pred_root)
+    meta_graphs = _discover_pair_graphs(emb_mode=emb_mode, pred_root=pred_root)
     if not meta_graphs:
         raise RuntimeError(f"No valid pair graphs found in predictions_feat for dataset_type='{dataset_type}'.")
 
@@ -545,6 +547,7 @@ def build_dataloaders_pairs(
                 train_ratio=train_ratio,
                 split_mode=split_mode,
                 dataset_type=dataset_type,
+                emb_mode=emb_mode,
             )
 
     # 3) Load only the requested subsets
@@ -589,9 +592,9 @@ def build_dataloaders_pairs(
     # Embedding dim from any available side
     emb_dim = None
     if train_graphs:
-        emb_dim = train_graphs[0]["emb_shape"][-1]
+        emb_dim = train_graphs[0]["emb_i"].shape[-1]
     elif val_graphs:
-        emb_dim = val_graphs[0]["emb_shape"][-1]
+        emb_dim = val_graphs[0]["emb_i"].shape[-1]
     else:
         emb_dim = -1
 
@@ -605,6 +608,7 @@ def build_dataloaders_pairs(
         emb_dim=emb_dim,
         split_mode=split_mode,
         dataset_type=dataset_type,
+        emb_mode=emb_mode,
         subset=subset,
         split_index_path=split_index_path or "",
     )
@@ -636,6 +640,7 @@ def build_dataloaders_pairs_cross(
     hard_neg_rel_thr: float = 0.3,
     layer_mode: str = "1st_last",
     split_mode: str = "scene_disjoint",
+    emb_mode: str = "avg",
     train_train_ratio: float = None,
     eval_train_ratio: float = None,
 ) -> Tuple[DataLoader, DataLoader, Dataset, Dataset, Dict]:
@@ -665,7 +670,7 @@ def build_dataloaders_pairs_cross(
 
     # --------- TRAIN DATASET ---------
     train_root = _root_for(train_dataset_type)
-    train_meta_graphs = _discover_pair_graphs(pred_root=train_root)
+    train_meta_graphs = _discover_pair_graphs(emb_mode=emb_mode, pred_root=train_root)
     train_graphs_all = _load_graphs_from_meta(train_meta_graphs)
     if not train_graphs_all:
         raise RuntimeError(f"No valid pair graphs found for train_dataset_type='{train_dataset_type}'.")
@@ -685,7 +690,7 @@ def build_dataloaders_pairs_cross(
 
     # --------- EVAL DATASET ---------
     eval_root = _root_for(eval_dataset_type)
-    eval_meta_graphs = _discover_pair_graphs(pred_root=eval_root)
+    eval_meta_graphs = _discover_pair_graphs(emb_mode=emb_mode, pred_root=eval_root)
     eval_graphs_all = _load_graphs_from_meta(eval_meta_graphs)
     if not eval_graphs_all:
         raise RuntimeError(f"No valid pair graphs found for eval_dataset_type='{eval_dataset_type}'.")
@@ -734,8 +739,8 @@ def build_dataloaders_pairs_cross(
         drop_last=False,
     )
 
-    emb_dim_train = train_graphs_all[0]["emb_shape"][-1]
-    emb_dim_eval = eval_graphs_all[0]["emb_shape"][-1]
+    emb_dim_train = train_graphs_all[0]["emb_i"].shape[-1]
+    emb_dim_eval = eval_graphs_all[0]["emb_i"].shape[-1]
     if emb_dim_train != emb_dim_eval:
         raise ValueError(
             f"Embedding dims differ between datasets: {emb_dim_train} (train) vs {emb_dim_eval} (eval)."
@@ -755,6 +760,7 @@ def build_dataloaders_pairs_cross(
         split_mode=split_mode,
         train_dataset_type=train_dataset_type,
         eval_dataset_type=eval_dataset_type,
+        emb_mode=emb_mode,
     )
 
     print(
@@ -809,6 +815,13 @@ if __name__ == "__main__":
         help="Dataset type / source of pair embeddings: 'gibson' or 'hm3d'.",
     )
     parser.add_argument(
+        "--emb_mode",
+        type=str,
+        default="avg",
+        choices=["avg", "avg_max", "chunked"],
+        help="Dataset type / source of pair embeddings: 'gibson' or 'hm3d'.",
+    )
+    parser.add_argument(
         "--subset",
         type=str,
         default="both",
@@ -844,6 +857,7 @@ if __name__ == "__main__":
         hard_neg_rel_thr=args.hard_neg_rel_thr,
         layer_mode=args.layer_mode,
         split_mode=args.split_mode,
+        emb_mode=args.emb_mode,
         subset=args.subset,
         split_index_path=args.split_index_path or None,
         persist_split_index=args.persist_split_index,
