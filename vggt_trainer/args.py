@@ -53,7 +53,7 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         default=518,
         help="Final (H, W) fed to VGGT when preprocess_mode='square'.",
     )
-    parser.add_argument("--batch_size", type=int, default=2, help="Number of image pairs per batch.")
+    parser.add_argument("--batch_size", type=int, default=64, help="Number of image pairs per batch.")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers.")
     parser.add_argument("--seed", type=int, default=2026, help="Random seed for all RNGs.")
     parser.add_argument(
@@ -67,14 +67,14 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--emb_mode",
         type=str,
-        default="avg_max",
+        default="chunked",
         choices=["avg", "avg_max", "chunked"],
         help="How to pool VGGT tokens into per-image embeddings.",
     )
     parser.add_argument(
         "--token_chunks",
         type=int,
-        default=4,
+        default=5,
         help="Chunk count for emb_mode='chunked'. Ignored otherwise.",
     )
     parser.add_argument(
