@@ -4,64 +4,33 @@ Entry-point script for training a lightweight head on top of frozen VGGT feature
 """
 from __future__ import annotations
 
-import os
-import random
+import sys
 from pathlib import Path
 from typing import Dict, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-# Add the main folder to the Python path
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Ensure repository root is importable for shared utilities.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
 
 from vggt_trainer.args import build_vggt_trainer_parser
 from vggt_trainer.data import (
-    build_image_pair_dataloaders,
-    build_multiview_dataloaders,
+    build_multiview_dataloaders_from_args,
+    build_pair_dataloaders_from_args,
 )
 from vggt_trainer.model import VGGTHeadModel
+from vggt_trainer.utils import (
+    compute_graph_metrics,
+    count_parameters,
+    ensure_dir,
+    resolve_device,
+    set_seed,
+)
 from utils.utils import setup_wandb, wandb_finish, wandb_log, wandb_save
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def compute_graph_metrics(probs: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
-    """
-    Mirror the graph metrics used in the existing trainer:
-        - graph_IOU: best IoU across probability thresholds
-        - graph_AUC: area under the IoU-threshold curve
-    """
-    if probs.size == 0:
-        return {"graph_IOU": float("nan"), "graph_AUC": float("nan")}
-
-    y_true = (labels >= 0.5).astype(np.float32)
-    thresholds = np.linspace(0.0, 1.0, 100)
-    ious = []
-    eps = 1e-6
-
-    for t in thresholds:
-        pred = (probs >= t).astype(np.float32)
-        inter = np.logical_and(pred, y_true).sum()
-        union = np.logical_or(pred, y_true).sum()
-        iou = inter / (union + eps)
-        ious.append(iou)
-
-    if hasattr(np, "trapezoid"):
-        graph_auc = float(np.trapezoid(ious, thresholds))
-    else:
-        graph_auc = float(np.trapz(ious, thresholds))
-    best_iou = float(np.max(ious))
-    return {"graph_IOU": best_iou, "graph_AUC": graph_auc}
 
 
 def run_epoch(
@@ -154,6 +123,87 @@ def run_epoch(
     return metrics
 
 
+def prepare_dataloaders(
+    args,
+    device: torch.device,
+    wandb_run,
+):
+    """Build train/val dataloaders based on the selected mode."""
+    if args.mode == "pairwise":
+        (
+            train_loader,
+            val_loader,
+            train_dataset,
+            val_dataset,
+            meta,
+        ) = build_pair_dataloaders_from_args(args, device=device)
+        print(
+            f"[DATA] Loaded {meta['train_pairs']} train pairs "
+            f"({meta['train_scenes']} scenes). "
+            f"Val pairs={meta['val_pairs']} ({meta['val_scenes']} scenes)"
+        )
+        wandb_log(
+            wandb_run,
+            {
+                "data/train_pairs": meta["train_pairs"],
+                "data/val_pairs": meta["val_pairs"],
+                "data/train_scenes": meta["train_scenes"],
+                "data/val_scenes": meta["val_scenes"],
+            },
+        )
+    else:
+        train_loader, val_loader, meta = build_multiview_dataloaders_from_args(
+            args,
+            device=device,
+        )
+        train_dataset = None
+        val_dataset = None
+        print(
+            f"[DATA] Multiview scenes: train={meta['train_scenes']}, "
+            f"val={meta['val_scenes']}, max_pairs_per_scene={meta['max_pairs_per_scene']}"
+        )
+        wandb_log(
+            wandb_run,
+            {
+                "data/train_scenes": meta["train_scenes"],
+                "data/val_scenes": meta["val_scenes"],
+                "data/max_pairs_per_scene": meta["max_pairs_per_scene"],
+            },
+        )
+
+    return train_loader, val_loader, train_dataset, val_dataset, meta
+
+
+def warmup_head(model: VGGTHeadModel, args, train_loader, train_dataset):
+    """
+    Run a tiny forward pass to instantiate the head before constructing the optimizer.
+    """
+    if args.mode == "pairwise" and train_dataset is not None:
+        sample = train_dataset[0]
+        with torch.no_grad():
+            _ = model(sample["images"].unsqueeze(0).to(model.device))
+    elif args.mode == "multiview" and train_loader is not None:
+        sample_scene = next(iter(train_loader))
+        with torch.no_grad():
+            emb_sample = model.encode_views(sample_scene["images"].to(model.device))
+            model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
+
+
+def log_parameter_counts(model: VGGTHeadModel, wandb_run):
+    counts = count_parameters(model, model.head)
+    print(f"[PARAM] Total parameters (VGGT + head): {counts['total']:,}")
+    print(f"[PARAM] Head parameters only: {counts['head']:,}")
+    print(f"[PARAM] Trainable parameters: {counts['trainable']:,}")
+    wandb_log(
+        wandb_run,
+        {
+            "params/total": counts["total"],
+            "params/head": counts["head"],
+            "params/trainable": counts["trainable"],
+        },
+    )
+
+
 def save_head_checkpoint(
     model: VGGTHeadModel,
     optimizer: Optional[torch.optim.Optimizer],
@@ -178,7 +228,7 @@ def main():
     args = parser.parse_args()
 
     set_seed(args.seed)
-    os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = ensure_dir(args.output_dir)
 
     wandb_run = setup_wandb(
         project=args.wandb_project,
@@ -188,80 +238,18 @@ def main():
     )
 
     try:
-        device = args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+        device = resolve_device(args.device)
         print(f"[SETUP] Using device {device}")
 
-        if args.mode == "pairwise":
-            (
-                train_loader,
-                val_loader,
-                train_dataset,
-                val_dataset,
-                meta,
-            ) = build_image_pair_dataloaders(
-                dataset_type=args.dataset_type,
-                batch_size=args.batch_size,
-                val_batch_size=args.eval_batch_size,
-                num_workers=args.num_workers,
-                prefetch_factor=args.prefetch_factor,
-                persistent_workers=None if not args.disable_persistent_workers else False,
-                seed=args.seed,
-                train_ratio=args.train_ratio,
-                split_mode=args.split_mode,
-                split_index_path=args.split_index_path or None,
-                preprocess_mode=args.preprocess_mode,
-                square_size=args.square_size,
-                max_pairs_per_split=args.max_pairs_per_split,
-                device=device,
-            )
-            print(
-                f"[DATA] Loaded {meta['train_pairs']} train pairs "
-                f"({meta['train_scenes']} scenes). "
-                f"Val pairs={meta['val_pairs']} ({meta['val_scenes']} scenes)"
-            )
-            wandb_log(
-                wandb_run,
-                {
-                    "data/train_pairs": meta["train_pairs"],
-                    "data/val_pairs": meta["val_pairs"],
-                    "data/train_scenes": meta["train_scenes"],
-                    "data/val_scenes": meta["val_scenes"],
-                },
-            )
-        else:
-            train_loader, val_loader, meta = build_multiview_dataloaders(
-                dataset_type=args.dataset_type,
-                train_ratio=args.train_ratio,
-                split_mode=args.split_mode,
-                seed=args.seed,
-                batch_size=1,
-                num_workers=args.num_workers,
-                prefetch_factor=args.prefetch_factor,
-                persistent_workers=None if not args.disable_persistent_workers else False,
-                preprocess_mode=args.preprocess_mode,
-                square_size=args.square_size,
-                max_pairs_per_scene=args.max_pairs_per_scene,
-                split_index_path=args.split_index_path or None,
-                device=device,
-            )
-            train_dataset = None
-            val_dataset = None
-            print(
-                f"[DATA] Multiview scenes: train={meta['train_scenes']}, "
-                f"val={meta['val_scenes']}, max_pairs_per_scene={meta['max_pairs_per_scene']}"
-            )
-            wandb_log(
-                wandb_run,
-                {
-                    "data/train_scenes": meta["train_scenes"],
-                    "data/val_scenes": meta["val_scenes"],
-                    "data/max_pairs_per_scene": meta["max_pairs_per_scene"],
-                },
-            )
+        train_loader, val_loader, train_dataset, val_dataset, meta = prepare_dataloaders(
+            args=args,
+            device=device,
+            wandb_run=wandb_run,
+        )
 
         model = VGGTHeadModel(
             backbone_ckpt=args.backbone_ckpt,
-            device=device,
+            device=str(device),
             layer_mode=args.layer_mode,
             head_hidden_dim=args.head_hidden_dim,
             head_dropout=args.head_dropout,
@@ -270,34 +258,8 @@ def main():
             summary_heads=args.summary_heads,
         )
 
-        # Make sure the head exists before constructing the optimizer by running a dry pass.
-        if args.mode == "pairwise" and train_loader is not None:
-            sample = train_dataset[0]
-            with torch.no_grad():
-                _ = model(sample["images"].unsqueeze(0).to(model.device))
-        elif args.mode == "multiview" and train_loader is not None:
-            sample_scene = next(iter(train_loader))
-            with torch.no_grad():
-                emb_sample = model.encode_views(sample_scene["images"].to(model.device))
-                if emb_sample.dim() == 2:
-                    model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
-                else:
-                    model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
-
-        total_params = sum(p.numel() for p in model.parameters())
-        head_params = sum(p.numel() for p in model.head.parameters()) if model.head is not None else 0
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"[PARAM] Total parameters (VGGT + head): {total_params:,}")
-        print(f"[PARAM] Head parameters only: {head_params:,}")
-        print(f"[PARAM] Trainable parameters: {trainable_params:,}")
-        wandb_log(
-            wandb_run,
-            {
-                "params/total": total_params,
-                "params/head": head_params,
-                "params/trainable": trainable_params,
-            },
-        )
+        warmup_head(model, args, train_loader, train_dataset)
+        log_parameter_counts(model, wandb_run)
 
         optimizer = torch.optim.AdamW(
             model.head_parameters(),
@@ -364,7 +326,7 @@ def main():
                 )
                 if val_metrics["graph_AUC"] > best_graph_auc:
                     best_graph_auc = val_metrics["graph_AUC"]
-                    ckpt_path = Path(args.output_dir) / "best_head.pt"
+                    ckpt_path = output_dir / "best_head.pt"
                     save_head_checkpoint(
                         model,
                         optimizer,
@@ -383,7 +345,7 @@ def main():
                     best_graph_auc = train_metrics["graph_AUC"]
 
             if args.save_every > 0 and epoch % args.save_every == 0:
-                ckpt_path = Path(args.output_dir) / f"head_epoch{epoch}.pt"
+                ckpt_path = output_dir / f"head_epoch{epoch}.pt"
                 save_head_checkpoint(
                     model,
                     optimizer,

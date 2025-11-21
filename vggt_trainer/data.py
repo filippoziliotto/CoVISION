@@ -401,9 +401,7 @@ def build_image_pair_dataloaders(
     batch_size: int,
     val_batch_size: Optional[int],
     num_workers: int,
-    prefetch_factor: Optional[int] = None,
-    persistent_workers: Optional[bool] = None,
-    seed: int = 2026,
+    seed: int,
     train_ratio: Optional[float],
     split_mode: str,
     split_index_path: Optional[str],
@@ -411,6 +409,8 @@ def build_image_pair_dataloaders(
     square_size: int,
     max_pairs_per_split: int,
     device: Optional[str] = None,
+    prefetch_factor: Optional[int] = None,
+    persistent_workers: Optional[bool] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], PairImageDataset, Optional[PairImageDataset], Dict]:
     """Entry point used by the training script."""
     train_ratio = _default_train_ratio(dataset_type, train_ratio)
@@ -500,8 +500,13 @@ def build_image_pair_dataloaders(
 
 __all__ = [
     "PairImageDataset",
+    "MultiViewSceneDataset",
     "PairRecord",
     "build_image_pair_dataloaders",
+    "build_multiview_dataloaders",
+    "build_pair_dataloaders_from_args",
+    "build_multiview_dataloaders_from_args",
+    "collate_scene",
     "load_pair_tensor",
 ]
 
@@ -611,13 +616,13 @@ def build_multiview_dataloaders(
     seed: int,
     batch_size: int,
     num_workers: int,
-    prefetch_factor: Optional[int] = None,
-    persistent_workers: Optional[bool] = None,
     preprocess_mode: str,
     square_size: int,
     max_pairs_per_scene: int,
     split_index_path: Optional[str] = None,
     device: Optional[str] = None,
+    prefetch_factor: Optional[int] = None,
+    persistent_workers: Optional[bool] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
     """Build train/val dataloaders for multiview training (one scene per batch)."""
     train_ratio = _default_train_ratio(dataset_type, train_ratio)
@@ -692,3 +697,63 @@ def build_multiview_dataloaders(
         split_index_path=split_index_path or "",
     )
     return train_loader, val_loader, meta
+
+
+# -------------------------------------------------------------------------
+# Argument-friendly builders
+# -------------------------------------------------------------------------
+def _persistent_worker_flag(disable_flag: bool) -> Optional[bool]:
+    """Return None (auto) unless the user explicitly disables persistent workers."""
+    return None if not disable_flag else False
+
+
+def build_pair_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
+    DataLoader,
+    Optional[DataLoader],
+    PairImageDataset,
+    Optional[PairImageDataset],
+    Dict,
+]:
+    """
+    Convenience wrapper to build pairwise dataloaders directly from argparse args.
+    Keeps the training/eval scripts terse and consistent.
+    """
+    return build_image_pair_dataloaders(
+        dataset_type=args.dataset_type,
+        batch_size=args.batch_size,
+        val_batch_size=args.eval_batch_size,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+        seed=args.seed,
+        train_ratio=args.train_ratio,
+        split_mode=args.split_mode,
+        split_index_path=args.split_index_path or None,
+        preprocess_mode=args.preprocess_mode,
+        square_size=args.square_size,
+        max_pairs_per_split=args.max_pairs_per_split,
+        device=str(device) if device is not None else None,
+    )
+
+
+def build_multiview_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
+    DataLoader,
+    Optional[DataLoader],
+    Dict,
+]:
+    """Argument-aware wrapper for multiview dataloaders."""
+    return build_multiview_dataloaders(
+        dataset_type=args.dataset_type,
+        train_ratio=args.train_ratio,
+        split_mode=args.split_mode,
+        seed=args.seed,
+        batch_size=1,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+        preprocess_mode=args.preprocess_mode,
+        square_size=args.square_size,
+        max_pairs_per_scene=args.max_pairs_per_scene,
+        split_index_path=args.split_index_path or None,
+        device=str(device) if device is not None else None,
+    )

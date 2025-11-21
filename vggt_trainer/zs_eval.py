@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
@@ -20,12 +21,15 @@ from sklearn.metrics import accuracy_score, average_precision_score, f1_score, r
 from tqdm import tqdm
 
 # Make repository root importable (same as train_head.py)
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
 
-from utils.utils import format_metric_line, plot_iou_curves, set_seed  # noqa: E402
+from utils.utils import format_metric_line, plot_iou_curves  # noqa: E402
 from vggt_trainer.args import build_vggt_trainer_parser  # noqa: E402
-from vggt_trainer.data import build_image_pair_dataloaders  # noqa: E402
+from vggt_trainer.data import build_pair_dataloaders_from_args  # noqa: E402
 from vggt_trainer.model import VGGTHeadModel, _resolve_layer_indices  # noqa: E402
+from vggt_trainer.utils import resolve_device, set_seed  # noqa: E402
 
 
 def _empty_metrics() -> Dict[str, float]:
@@ -283,10 +287,9 @@ def zero_shot_eval(
 def main():
     parser = build_vggt_trainer_parser()
     args = parser.parse_args()
-    
 
     set_seed(args.seed)
-    device = args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
     print(f"[SETUP] Using device {device}")
 
     (
@@ -295,22 +298,7 @@ def main():
         train_dataset,
         val_dataset,
         meta,
-    ) = build_image_pair_dataloaders(
-        dataset_type=args.dataset_type,
-        batch_size=args.batch_size,
-        val_batch_size=args.eval_batch_size,
-        num_workers=args.num_workers,
-        prefetch_factor=args.prefetch_factor,
-        persistent_workers=None if not args.disable_persistent_workers else False,
-        seed=args.seed,
-        train_ratio=args.train_ratio,
-        split_mode=args.split_mode,
-        split_index_path=args.split_index_path or None,
-        preprocess_mode=args.preprocess_mode,
-        square_size=args.square_size,
-        max_pairs_per_split=args.max_pairs_per_split,
-        device=device,
-    )
+    ) = build_pair_dataloaders_from_args(args, device=device)
 
     print(
         f"[DATA] train_pairs={meta['train_pairs']} "
@@ -323,7 +311,7 @@ def main():
 
     model = VGGTHeadModel(
         backbone_ckpt=args.backbone_ckpt,
-        device=device,
+        device=str(device),
         layer_mode=args.layer_mode,
         head_hidden_dim=args.head_hidden_dim,
         head_dropout=args.head_dropout,
