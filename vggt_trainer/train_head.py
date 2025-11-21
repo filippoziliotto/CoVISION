@@ -24,6 +24,7 @@ from vggt_trainer.data import (
     build_multiview_dataloaders,
 )
 from vggt_trainer.model import VGGTHeadModel
+from utils.utils import setup_wandb, wandb_finish, wandb_log, wandb_save
 
 
 def set_seed(seed: int):
@@ -165,156 +166,214 @@ def main():
     set_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    device = args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[SETUP] Using device {device}")
-
-    if args.mode == "pairwise":
-        (
-            train_loader,
-            val_loader,
-            train_dataset,
-            val_dataset,
-            meta,
-        ) = build_image_pair_dataloaders(
-            dataset_type=args.dataset_type,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            seed=args.seed,
-            train_ratio=args.train_ratio,
-            split_mode=args.split_mode,
-            preprocess_mode=args.preprocess_mode,
-            square_size=args.square_size,
-            max_pairs_per_split=args.max_pairs_per_split,
-        )
-        print(
-            f"[DATA] Loaded {meta['train_pairs']} train pairs "
-            f"({meta['train_scenes']} scenes). "
-            f"Val pairs={meta['val_pairs']} ({meta['val_scenes']} scenes)"
-        )
-    else:
-        train_loader, val_loader, meta = build_multiview_dataloaders(
-            dataset_type=args.dataset_type,
-            train_ratio=args.train_ratio or (0.8 if args.dataset_type == "gibson" else 0.9),
-            split_mode=args.split_mode,
-            seed=args.seed,
-            batch_size=1,
-            num_workers=args.num_workers,
-            preprocess_mode=args.preprocess_mode,
-            square_size=args.square_size,
-            max_pairs_per_scene=args.max_pairs_per_scene,
-        )
-        train_dataset = None
-        val_dataset = None
-        print(
-            f"[DATA] Multiview scenes: train={meta['train_scenes']}, "
-            f"val={meta['val_scenes']}, max_pairs_per_scene={meta['max_pairs_per_scene']}"
-        )
-
-    model = VGGTHeadModel(
-        backbone_ckpt=args.backbone_ckpt,
-        device=device,
-        layer_mode=args.layer_mode,
-        head_hidden_dim=args.head_hidden_dim,
-        head_dropout=args.head_dropout,
-        token_proj_dim=args.token_proj_dim,
-        summary_tokens=args.summary_tokens,
-        summary_heads=args.summary_heads,
+    wandb_run = setup_wandb(
+        project=args.wandb_project,
+        run_name=args.wandb_run_name,
+        config=vars(args),
+        disabled=args.wandb_off,
     )
 
-    # Make sure the head exists before constructing the optimizer by running a dry pass.
-    if args.mode == "pairwise" and train_loader is not None:
-        sample = train_dataset[0]
-        with torch.no_grad():
-            _ = model(sample["images"].unsqueeze(0).to(model.device))
-    elif args.mode == "multiview" and train_loader is not None:
-        sample_scene = next(iter(train_loader))
-        with torch.no_grad():
-            emb_sample = model.encode_views(sample_scene["images"].to(model.device))
-            if emb_sample.dim() == 2:
-                model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
-            else:
-                model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
+    try:
+        device = args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[SETUP] Using device {device}")
 
-    total_params = sum(p.numel() for p in model.parameters())
-    head_params = sum(p.numel() for p in model.head.parameters()) if model.head is not None else 0
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"[PARAM] Total parameters (VGGT + head): {total_params:,}")
-    print(f"[PARAM] Head parameters only: {head_params:,}")
-    print(f"[PARAM] Trainable parameters: {trainable_params:,}")
+        if args.mode == "pairwise":
+            (
+                train_loader,
+                val_loader,
+                train_dataset,
+                val_dataset,
+                meta,
+            ) = build_image_pair_dataloaders(
+                dataset_type=args.dataset_type,
+                batch_size=args.batch_size,
+                num_workers=args.num_workers,
+                seed=args.seed,
+                train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
+                split_mode=args.split_mode,
+                preprocess_mode=args.preprocess_mode,
+                square_size=args.square_size,
+                max_pairs_per_split=args.max_pairs_per_split,
+            )
+            print(
+                f"[DATA] Loaded {meta['train_pairs']} train pairs "
+                f"({meta['train_scenes']} scenes). "
+                f"Val pairs={meta['val_pairs']} ({meta['val_scenes']} scenes)"
+            )
+            wandb_log(
+                wandb_run,
+                {
+                    "data/train_pairs": meta["train_pairs"],
+                    "data/val_pairs": meta["val_pairs"],
+                    "data/train_scenes": meta["train_scenes"],
+                    "data/val_scenes": meta["val_scenes"],
+                },
+            )
+        else:
+            train_loader, val_loader, meta = build_multiview_dataloaders(
+                dataset_type=args.dataset_type,
+                train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
+                split_mode=args.split_mode,
+                seed=args.seed,
+                batch_size=1,
+                num_workers=args.num_workers,
+                preprocess_mode=args.preprocess_mode,
+                square_size=args.square_size,
+                max_pairs_per_scene=args.max_pairs_per_scene,
+            )
+            train_dataset = None
+            val_dataset = None
+            print(
+                f"[DATA] Multiview scenes: train={meta['train_scenes']}, "
+                f"val={meta['val_scenes']}, max_pairs_per_scene={meta['max_pairs_per_scene']}"
+            )
+            wandb_log(
+                wandb_run,
+                {
+                    "data/train_scenes": meta["train_scenes"],
+                    "data/val_scenes": meta["val_scenes"],
+                    "data/max_pairs_per_scene": meta["max_pairs_per_scene"],
+                },
+            )
 
-    optimizer = torch.optim.AdamW(
-        model.head_parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
-    criterion = nn.BCEWithLogitsLoss()
-
-    best_graph_auc = -1.0
-    for epoch in range(1, args.epochs + 1):
-        print(f"\n[EPOCH {epoch}] -----------------------------")
-        train_metrics = run_epoch(
-            model=model,
-            loader=train_loader,
-            criterion=criterion,
-            optimizer=optimizer,
-            grad_clip=args.grad_clip,
-            log_every=args.log_every,
-            max_steps=args.max_train_steps,
-            multiview=(args.mode == "multiview"),
+        model = VGGTHeadModel(
+            backbone_ckpt=args.backbone_ckpt,
+            device=device,
+            layer_mode=args.layer_mode,
+            head_hidden_dim=args.head_hidden_dim,
+            head_dropout=args.head_dropout,
+            token_proj_dim=args.token_proj_dim,
+            summary_tokens=args.summary_tokens,
+            summary_heads=args.summary_heads,
         )
-        print(
-            f"[TRAIN] epoch={epoch} loss={train_metrics['loss']:.4f} "
-            f"graph_IOU={train_metrics['graph_IOU']:.4f} "
-            f"graph_AUC={train_metrics['graph_AUC']:.4f}"
+
+        # Make sure the head exists before constructing the optimizer by running a dry pass.
+        if args.mode == "pairwise" and train_loader is not None:
+            sample = train_dataset[0]
+            with torch.no_grad():
+                _ = model(sample["images"].unsqueeze(0).to(model.device))
+        elif args.mode == "multiview" and train_loader is not None:
+            sample_scene = next(iter(train_loader))
+            with torch.no_grad():
+                emb_sample = model.encode_views(sample_scene["images"].to(model.device))
+                if emb_sample.dim() == 2:
+                    model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
+                else:
+                    model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
+
+        total_params = sum(p.numel() for p in model.parameters())
+        head_params = sum(p.numel() for p in model.head.parameters()) if model.head is not None else 0
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[PARAM] Total parameters (VGGT + head): {total_params:,}")
+        print(f"[PARAM] Head parameters only: {head_params:,}")
+        print(f"[PARAM] Trainable parameters: {trainable_params:,}")
+        wandb_log(
+            wandb_run,
+            {
+                "params/total": total_params,
+                "params/head": head_params,
+                "params/trainable": trainable_params,
+            },
         )
 
-        if not args.skip_eval and val_loader is not None and val_dataset is not None:
-            val_metrics = run_epoch(
+        optimizer = torch.optim.AdamW(
+            model.head_parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+        criterion = nn.BCEWithLogitsLoss()
+
+        best_graph_auc = -1.0
+        for epoch in range(1, args.epochs + 1):
+            print(f"\n[EPOCH {epoch}] -----------------------------")
+            train_metrics = run_epoch(
                 model=model,
-                loader=val_loader,
+                loader=train_loader,
                 criterion=criterion,
-                optimizer=None,
-                grad_clip=0.0,
-                log_every=0,
-                max_steps=-1,
+                optimizer=optimizer,
+                grad_clip=args.grad_clip,
+                log_every=args.log_every,
+                max_steps=args.max_train_steps,
                 multiview=(args.mode == "multiview"),
             )
             print(
-                f"[VAL]   epoch={epoch} loss={val_metrics['loss']:.4f} "
-                f"graph_IOU={val_metrics['graph_IOU']:.4f} "
-                f"graph_AUC={val_metrics['graph_AUC']:.4f}"
+                f"[TRAIN] epoch={epoch} loss={train_metrics['loss']:.4f} "
+                f"graph_IOU={train_metrics['graph_IOU']:.4f} "
+                f"graph_AUC={train_metrics['graph_AUC']:.4f}"
             )
-            if val_metrics["graph_AUC"] > best_graph_auc:
-                best_graph_auc = val_metrics["graph_AUC"]
-                ckpt_path = Path(args.output_dir) / "best_head.pt"
+            wandb_log(
+                wandb_run,
+                {
+                    "epoch": epoch,
+                    "train/loss": train_metrics["loss"],
+                    "train/graph_IOU": train_metrics["graph_IOU"],
+                    "train/graph_AUC": train_metrics["graph_AUC"],
+                },
+                step=epoch,
+            )
+
+            if not args.skip_eval and val_loader is not None and val_dataset is not None:
+                val_metrics = run_epoch(
+                    model=model,
+                    loader=val_loader,
+                    criterion=criterion,
+                    optimizer=None,
+                    grad_clip=0.0,
+                    log_every=0,
+                    max_steps=-1,
+                    multiview=(args.mode == "multiview"),
+                )
+                print(
+                    f"[VAL]   epoch={epoch} loss={val_metrics['loss']:.4f} "
+                    f"graph_IOU={val_metrics['graph_IOU']:.4f} "
+                    f"graph_AUC={val_metrics['graph_AUC']:.4f}"
+                )
+                wandb_log(
+                    wandb_run,
+                    {
+                        "epoch": epoch,
+                        "val/loss": val_metrics["loss"],
+                        "val/graph_IOU": val_metrics["graph_IOU"],
+                        "val/graph_AUC": val_metrics["graph_AUC"],
+                    },
+                    step=epoch,
+                )
+                if val_metrics["graph_AUC"] > best_graph_auc:
+                    best_graph_auc = val_metrics["graph_AUC"]
+                    ckpt_path = Path(args.output_dir) / "best_head.pt"
+                    save_head_checkpoint(
+                        model,
+                        optimizer,
+                        args,
+                        epoch,
+                        metrics={
+                            "train": train_metrics,
+                            "val": val_metrics,
+                        },
+                        path=ckpt_path,
+                    )
+                    wandb_save(wandb_run, str(ckpt_path))
+            else:
+                # Still keep track of the best training metric for logging.
+                if train_metrics["graph_AUC"] > best_graph_auc:
+                    best_graph_auc = train_metrics["graph_AUC"]
+
+            if args.save_every > 0 and epoch % args.save_every == 0:
+                ckpt_path = Path(args.output_dir) / f"head_epoch{epoch}.pt"
                 save_head_checkpoint(
                     model,
                     optimizer,
                     args,
                     epoch,
-                    metrics={
-                        "train": train_metrics,
-                        "val": val_metrics,
-                    },
+                    metrics={"train": train_metrics},
                     path=ckpt_path,
                 )
-        else:
-            # Still keep track of the best training metric for logging.
-            if train_metrics["graph_AUC"] > best_graph_auc:
-                best_graph_auc = train_metrics["graph_AUC"]
+                wandb_save(wandb_run, str(ckpt_path))
 
-        if args.save_every > 0 and epoch % args.save_every == 0:
-            ckpt_path = Path(args.output_dir) / f"head_epoch{epoch}.pt"
-            save_head_checkpoint(
-                model,
-                optimizer,
-                args,
-                epoch,
-                metrics={"train": train_metrics},
-                path=ckpt_path,
-            )
-
-    print(f"[DONE] Training finished. Best metric={best_graph_auc:.4f}")
+        wandb_log(wandb_run, {"best/graph_AUC": best_graph_auc})
+        print(f"[DONE] Training finished. Best metric={best_graph_auc:.4f}")
+    finally:
+        wandb_finish(wandb_run)
 
 
 if __name__ == "__main__":

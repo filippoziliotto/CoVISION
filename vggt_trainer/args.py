@@ -32,7 +32,7 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--train_ratio",
         type=float,
-        default=None,
+        default=0.8,
         help="Train split ratio. Leave empty to use 0.8 for Gibson and 0.9 for HM3D.",
     )
     parser.add_argument(
@@ -163,6 +163,23 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Print training progress every N batches.",
+    )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=None,
+        help="Weights & Biases project name (set None to disable).",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="Optional wandb run name to group runs.",
+    )
+    parser.add_argument(
+        "--wandb_off",
+        action="store_true",
+        help="Disable wandb logging regardless of project/run name.",
     )
     parser.add_argument(
         "--skip_eval",
