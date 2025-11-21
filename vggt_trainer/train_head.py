@@ -19,7 +19,10 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vggt_trainer.args import build_vggt_trainer_parser
-from vggt_trainer.data import build_image_pair_dataloaders
+from vggt_trainer.data import (
+    build_image_pair_dataloaders,
+    build_multiview_dataloaders,
+)
 from vggt_trainer.model import VGGTHeadModel
 
 
@@ -68,6 +71,7 @@ def run_epoch(
     grad_clip: float,
     log_every: int,
     max_steps: int,
+    multiview: bool = False,
 ) -> Dict[str, float]:
     is_train = optimizer is not None
     model.train(mode=is_train)
@@ -85,11 +89,18 @@ def run_epoch(
 
     with grad_ctx:
         for step, batch in enumerate(progress, start=1):
-            images = batch["images"].to(model.device, non_blocking=True)
-            labels = batch["label"].to(model.device, non_blocking=True).view(-1)
+            if multiview:
+                images = batch["images"].to(model.device, non_blocking=True)
+                pair_idx = batch["pairs"].to(model.device, non_blocking=True)
+                labels = batch["labels"].to(model.device, non_blocking=True).view(-1)
+                view_embs = model.encode_views(images)
+                logits = model.score_pair_indices(view_embs, pair_idx).view(-1)
+            else:
+                images = batch["images"].to(model.device, non_blocking=True)
+                labels = batch["label"].to(model.device, non_blocking=True).view(-1)
 
-            outputs = model(images)
-            logits = outputs["logits"].view(-1)
+                outputs = model(images)
+                logits = outputs["logits"].view(-1)
             loss = criterion(logits, labels)
 
             if is_train:
@@ -157,29 +168,47 @@ def main():
     device = args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[SETUP] Using device {device}")
 
-    (
-        train_loader,
-        val_loader,
-        train_dataset,
-        val_dataset,
-        meta,
-    ) = build_image_pair_dataloaders(
-        dataset_type=args.dataset_type,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        seed=args.seed,
-        train_ratio=args.train_ratio,
-        split_mode=args.split_mode,
-        preprocess_mode=args.preprocess_mode,
-        square_size=args.square_size,
-        max_pairs_per_split=args.max_pairs_per_split,
-    )
-
-    print(
-        f"[DATA] Loaded {meta['train_pairs']} train pairs "
-        f"({meta['train_scenes']} scenes). "
-        f"Val pairs={meta['val_pairs']} ({meta['val_scenes']} scenes)"
-    )
+    if args.mode == "pairwise":
+        (
+            train_loader,
+            val_loader,
+            train_dataset,
+            val_dataset,
+            meta,
+        ) = build_image_pair_dataloaders(
+            dataset_type=args.dataset_type,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            seed=args.seed,
+            train_ratio=args.train_ratio,
+            split_mode=args.split_mode,
+            preprocess_mode=args.preprocess_mode,
+            square_size=args.square_size,
+            max_pairs_per_split=args.max_pairs_per_split,
+        )
+        print(
+            f"[DATA] Loaded {meta['train_pairs']} train pairs "
+            f"({meta['train_scenes']} scenes). "
+            f"Val pairs={meta['val_pairs']} ({meta['val_scenes']} scenes)"
+        )
+    else:
+        train_loader, val_loader, meta = build_multiview_dataloaders(
+            dataset_type=args.dataset_type,
+            train_ratio=args.train_ratio or (0.8 if args.dataset_type == "gibson" else 0.9),
+            split_mode=args.split_mode,
+            seed=args.seed,
+            batch_size=1,
+            num_workers=args.num_workers,
+            preprocess_mode=args.preprocess_mode,
+            square_size=args.square_size,
+            max_pairs_per_scene=args.max_pairs_per_scene,
+        )
+        train_dataset = None
+        val_dataset = None
+        print(
+            f"[DATA] Multiview scenes: train={meta['train_scenes']}, "
+            f"val={meta['val_scenes']}, max_pairs_per_scene={meta['max_pairs_per_scene']}"
+        )
 
     model = VGGTHeadModel(
         backbone_ckpt=args.backbone_ckpt,
@@ -193,9 +222,18 @@ def main():
     )
 
     # Make sure the head exists before constructing the optimizer by running a dry pass.
-    sample = train_dataset[0]
-    with torch.no_grad():
-        _ = model(sample["images"].unsqueeze(0).to(model.device))
+    if args.mode == "pairwise" and train_loader is not None:
+        sample = train_dataset[0]
+        with torch.no_grad():
+            _ = model(sample["images"].unsqueeze(0).to(model.device))
+    elif args.mode == "multiview" and train_loader is not None:
+        sample_scene = next(iter(train_loader))
+        with torch.no_grad():
+            emb_sample = model.encode_views(sample_scene["images"].to(model.device))
+            if emb_sample.dim() == 2:
+                model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
+            else:
+                model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
 
     total_params = sum(p.numel() for p in model.parameters())
     head_params = sum(p.numel() for p in model.head.parameters()) if model.head is not None else 0
@@ -222,6 +260,7 @@ def main():
             grad_clip=args.grad_clip,
             log_every=args.log_every,
             max_steps=args.max_train_steps,
+            multiview=(args.mode == "multiview"),
         )
         print(
             f"[TRAIN] epoch={epoch} loss={train_metrics['loss']:.4f} "
@@ -238,6 +277,7 @@ def main():
                 grad_clip=0.0,
                 log_every=0,
                 max_steps=-1,
+                multiview=(args.mode == "multiview"),
             )
             print(
                 f"[VAL]   epoch={epoch} loss={val_metrics['loss']:.4f} "

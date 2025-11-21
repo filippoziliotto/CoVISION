@@ -674,7 +674,7 @@ class Trainer:
             iou_val = val_metrics.get("iou_curve", None)
 
             if thr_train is not None and iou_train is not None and thr_val is not None and iou_val is not None:
-                if args.save_plots:
+                if False:
                     plots_dir = os.path.join(args.out_dir, "plots")
                     plot_iou_curves(
                         thr_train,
@@ -693,7 +693,7 @@ class Trainer:
                 )
                 break
 
-        if args.save_plots:
+        if False:
             plots_dir = os.path.join(args.out_dir, "plots")
             plot_training_history(history, plots_dir)
 

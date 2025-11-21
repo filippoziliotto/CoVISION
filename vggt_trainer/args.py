@@ -13,6 +13,14 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="pairwise",
+        choices=["pairwise", "multiview"],
+        help="Training mode: pairwise edges or multiview scenes.",
+    )
+
     # Data-related arguments
     parser.add_argument(
         "--dataset_type",
@@ -39,6 +47,12 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         type=int,
         default=20000,
         help="Randomly subsample at most this many pairs per scene split for TRAINING (validation keeps all; set <=0 to disable).",
+    )
+    parser.add_argument(
+        "--max_pairs_per_scene",
+        type=int,
+        default=5000,
+        help="[multiview] Max pairs sampled per scene (set <=0 to take all).",
     )
     parser.add_argument(
         "--preprocess_mode",

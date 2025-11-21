@@ -314,18 +314,33 @@ class PairImageDataset(Dataset):
         self.pairs = pairs
         self.preprocess_mode = preprocess_mode
         self.square_size = square_size
+        self._image_cache: Dict[str, torch.Tensor] = {}
         self._depth_cache = {}
+
+    def _load_single_image(self, path: str) -> torch.Tensor:
+        """Load and preprocess a single image, caching the result."""
+        if path in self._image_cache:
+            return self._image_cache[path]
+
+        if self.preprocess_mode == "square":
+            imgs, _ = load_and_preprocess_images_square([path], target_size=self.square_size)
+            tensor = imgs[0]
+        else:
+            imgs = load_and_preprocess_images([path], mode=self.preprocess_mode)
+            imgs = _resize_pair_to_square(imgs, self.square_size)
+            tensor = imgs[0]
+
+        self._image_cache[path] = tensor
+        return tensor
 
     def __len__(self) -> int:
         return len(self.pairs)
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         record = self.pairs[index]
-        images = load_pair_tensor(
-            (record.img_i, record.img_j),
-            preprocess_mode=self.preprocess_mode,
-            square_size=self.square_size,
-        )
+        img_i = self._load_single_image(record.img_i)
+        img_j = self._load_single_image(record.img_j)
+        images = torch.stack([img_i, img_j], dim=0)
         depths = None
         if record.depth_path and os.path.isfile(record.depth_path):
             depth_arr = self._depth_cache.get(record.depth_path)
@@ -383,23 +398,28 @@ def build_image_pair_dataloaders(
     )
 
     pin_memory = torch.cuda.is_available()
-    train_loader = DataLoader(
-        train_dataset,
+    prefetch_factor = 2 if num_workers > 0 else None
+    loader_kwargs = dict(
         batch_size=batch_size,
-        shuffle=True,
         num_workers=num_workers,
         drop_last=False,
         pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+    )
+    if prefetch_factor:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    train_loader = DataLoader(
+        train_dataset,
+        shuffle=True,
+        **loader_kwargs,
     )
     val_loader = None
     if val_dataset is not None:
         val_loader = DataLoader(
             val_dataset,
-            batch_size=batch_size,
             shuffle=False,
-            num_workers=num_workers,
-            drop_last=False,
-            pin_memory=pin_memory,
+            **loader_kwargs,
         )
 
     meta = dict(
@@ -427,3 +447,172 @@ __all__ = [
     "build_image_pair_dataloaders",
     "load_pair_tensor",
 ]
+
+# -------------------------------------------------------------------------
+# Multi-view scene dataset (images + pair labels)
+# -------------------------------------------------------------------------
+def _load_scene_pairs(saved_obs: str) -> Tuple[List[Tuple[int, int, float, float]], List[str], Optional[str]]:
+    """Return pair list and ordered image files under a saved_obs directory."""
+    gt_csv = os.path.join(saved_obs, "GroundTruth.csv")
+    if not os.path.isfile(gt_csv):
+        return [], [], None
+
+    rel_mat = _load_rel_matrix(saved_obs)
+    depth_path = os.path.join(saved_obs, "saved_dep.npy")
+    has_depth = os.path.isfile(depth_path)
+
+    img_files = sorted(f for f in os.listdir(saved_obs) if f.endswith(".png"))
+    name_to_idx = {f: idx for idx, f in enumerate(img_files)}
+
+    pairs: List[Tuple[int, int, float, float]] = []
+    with open(gt_csv, newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            basename_i = os.path.basename(row["image_1"])
+            basename_j = os.path.basename(row["image_2"])
+            if basename_i not in name_to_idx or basename_j not in name_to_idx:
+                continue
+            idx_i = name_to_idx[basename_i]
+            idx_j = name_to_idx[basename_j]
+            label = float(row.get("label", 0))
+            if rel_mat is not None and rel_mat.shape[0] > max(idx_i, idx_j):
+                strength = float(rel_mat[idx_i, idx_j])
+            else:
+                strength = label
+            pairs.append((idx_i, idx_j, label, strength))
+
+    return pairs, img_files, depth_path if has_depth else None
+
+
+class MultiViewSceneDataset(Dataset):
+    """Each sample is one saved_obs scene with all images and its labeled pairs."""
+
+    def __init__(
+        self,
+        split_meta: List[Dict[str, str]],
+        max_pairs_per_scene: int,
+        preprocess_mode: str,
+        square_size: int,
+        seed: int,
+    ):
+        if not split_meta:
+            raise RuntimeError("MultiViewSceneDataset cannot be created with empty split metadata.")
+        self.split_meta = split_meta
+        self.max_pairs_per_scene = max_pairs_per_scene
+        self.preprocess_mode = preprocess_mode
+        self.square_size = square_size
+        self.rng = random.Random(seed)
+
+    def __len__(self) -> int:
+        return len(self.split_meta)
+
+    def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
+        meta = self.split_meta[index]
+        pairs, img_files, depth_path = _load_scene_pairs(meta["saved_obs"])
+        if not img_files:
+            raise RuntimeError(f"No PNG images found under {meta['saved_obs']}")
+
+        # Cache preprocessed scene images to avoid repeated I/O across epochs.
+        cache_key = meta["saved_obs"]
+        if not hasattr(self, "_scene_image_cache"):
+            self._scene_image_cache = {}
+        if cache_key in self._scene_image_cache:
+            images = self._scene_image_cache[cache_key]
+        else:
+            img_paths = [os.path.join(meta["saved_obs"], f) for f in img_files]
+            images, _ = load_and_preprocess_images_square(img_paths, target_size=self.square_size)
+            self._scene_image_cache[cache_key] = images
+
+        if self.max_pairs_per_scene > 0 and len(pairs) > self.max_pairs_per_scene:
+            pairs = self.rng.sample(pairs, k=self.max_pairs_per_scene)
+
+        pair_idx = torch.tensor([p[:2] for p in pairs], dtype=torch.long)
+        labels = torch.tensor([p[2] for p in pairs], dtype=torch.float32)
+        strengths = torch.tensor([p[3] for p in pairs], dtype=torch.float32)
+
+        depth_tensor = None
+        if depth_path and os.path.isfile(depth_path):
+            depth_arr = np.load(depth_path, allow_pickle=False)
+            if depth_arr.ndim >= 3 and depth_arr.shape[0] == len(img_files):
+                depth_tensor = torch.from_numpy(depth_arr).float()
+
+        return {
+            "images": images,  # (N,3,H,W)
+            "pairs": pair_idx,  # (P,2)
+            "labels": labels,  # (P,)
+            "strengths": strengths,  # (P,)
+            "scene_version": meta["scene_version"],
+            "split_id": meta["split_id"],
+            "depths": depth_tensor,  # (N,H,W) or None
+        }
+
+
+def build_multiview_dataloaders(
+    dataset_type: str,
+    train_ratio: float,
+    split_mode: str,
+    seed: int,
+    batch_size: int,
+    num_workers: int,
+    preprocess_mode: str,
+    square_size: int,
+    max_pairs_per_scene: int,
+) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
+    """Build train/val dataloaders for multiview training (one scene per batch)."""
+    split_meta = _discover_scene_splits(dataset_type)
+    train_meta, val_meta, stats = _split_meta(split_meta, seed, train_ratio, split_mode)
+
+    train_ds = MultiViewSceneDataset(
+        train_meta,
+        max_pairs_per_scene=max_pairs_per_scene,
+        preprocess_mode=preprocess_mode,
+        square_size=square_size,
+        seed=seed,
+    )
+    val_ds = (
+        MultiViewSceneDataset(
+            val_meta,
+            max_pairs_per_scene=max_pairs_per_scene,
+            preprocess_mode=preprocess_mode,
+            square_size=square_size,
+            seed=seed + 1,
+        )
+        if val_meta
+        else None
+    )
+
+    collate = lambda batch: batch[0]  # scenes have variable sizes; keep one per batch
+    pin_memory = torch.cuda.is_available()
+    prefetch_factor = 2 if num_workers > 0 else None
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        drop_last=False,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+        collate_fn=collate,
+    )
+    if prefetch_factor:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    train_loader = DataLoader(
+        train_ds,
+        shuffle=True,
+        **loader_kwargs,
+    )
+    val_loader = None
+    if val_ds is not None:
+        val_loader = DataLoader(
+            val_ds,
+            shuffle=False,
+            **loader_kwargs,
+        )
+
+    meta = dict(
+        train_scenes=len(train_ds),
+        val_scenes=len(val_ds) if val_ds is not None else 0,
+        train_ratio=train_ratio,
+        split_mode=split_mode,
+        max_pairs_per_scene=max_pairs_per_scene,
+    )
+    return train_loader, val_loader, meta

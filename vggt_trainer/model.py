@@ -281,6 +281,44 @@ class VGGTHeadModel(nn.Module):
         logits = self.head(emb_i, emb_j)["logits"]
         return {"logits": logits}
 
+    def encode_views(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Run VGGT on an arbitrary number of views and return per-view embeddings.
+        Returns (S, E) or (S, L, E) depending on layer selection.
+        """
+        if images.dim() == 4:
+            images = images.unsqueeze(0)
+        images = images.to(self.device)
+
+        with torch.no_grad():
+            preds = self.backbone(images, extract_features=True)
+            if "features_all" not in preds:
+                raise RuntimeError("VGGT outputs do not include 'features_all'.")
+            raw_layers = [feat.detach() for feat in preds["features_all"]]
+
+        embeddings = self._compute_layer_embeddings(raw_layers)  # (B, L, S, D)
+        selected = self._select_layers(embeddings).squeeze(0)  # (L, S, D)
+        view_first = selected.permute(1, 0, 2)  # (S, L, D)
+        if view_first.shape[1] == 1:
+            view_first = view_first[:, 0, :]
+        return view_first
+
+    def score_pair_indices(self, view_embeddings: torch.Tensor, pair_idx: torch.Tensor) -> torch.Tensor:
+        """
+        Given per-view embeddings and pair indices (P,2), return logits (P,).
+        """
+        if view_embeddings.dim() == 2:
+            emb_i = view_embeddings[pair_idx[:, 0]]
+            emb_j = view_embeddings[pair_idx[:, 1]]
+        elif view_embeddings.dim() == 3:
+            emb_i = view_embeddings[pair_idx[:, 0], ...]
+            emb_j = view_embeddings[pair_idx[:, 1], ...]
+        else:
+            raise ValueError(f"Unexpected view_embeddings shape {view_embeddings.shape}")
+
+        self._init_head_if_needed(emb_dim=emb_i.shape[-1])
+        return self.head(emb_i, emb_j)["logits"]
+
     @torch.no_grad()
     def forward_features(self, images: torch.Tensor, select_layers: bool = True) -> Dict[str, torch.Tensor]:
         """
