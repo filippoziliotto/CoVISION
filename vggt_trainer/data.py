@@ -30,6 +30,10 @@ HM3D_BASE_PATTERN = (
 )
 HM3D_PARTS = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "l"]
 
+# Collate helper for multiview scenes (one sample per batch).
+def collate_scene(batch):
+    return batch[0]
+
 
 @dataclass
 class PairRecord:
@@ -581,7 +585,6 @@ def build_multiview_dataloaders(
         else None
     )
 
-    collate = lambda batch: batch[0]  # scenes have variable sizes; keep one per batch
     pin_memory = torch.cuda.is_available()
     prefetch_factor = 2 if num_workers > 0 else None
     loader_kwargs = dict(
@@ -590,7 +593,7 @@ def build_multiview_dataloaders(
         drop_last=False,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
-        collate_fn=collate,
+        collate_fn=collate_scene,
     )
     if prefetch_factor:
         loader_kwargs["prefetch_factor"] = prefetch_factor

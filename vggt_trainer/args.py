@@ -16,7 +16,7 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         type=str,
-        default="pairwise",
+        default="multiview",
         choices=["pairwise", "multiview"],
         help="Training mode: pairwise edges or multiview scenes.",
     )
@@ -45,13 +45,13 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_pairs_per_split",
         type=int,
-        default=20000,
+        default=-1,
         help="Randomly subsample at most this many pairs per scene split for TRAINING (validation keeps all; set <=0 to disable).",
     )
     parser.add_argument(
         "--max_pairs_per_scene",
         type=int,
-        default=5000,
+        default=-1,
         help="[multiview] Max pairs sampled per scene (set <=0 to take all).",
     )
     parser.add_argument(
@@ -132,8 +132,8 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
     )
 
     # Optimisation arguments
-    parser.add_argument("--epochs", type=int, default=3, help="Training epochs.")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate for the head.")
+    parser.add_argument("--epochs", type=int, default=20, help="Training epochs.")
+    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate for the head.")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for AdamW.")
     parser.add_argument("--grad_clip", type=float, default=0.0, help="Gradient clipping (0 disables).")
     parser.add_argument("--head_hidden_dim", type=int, default=512, help="Hidden size of the MLP head.")
