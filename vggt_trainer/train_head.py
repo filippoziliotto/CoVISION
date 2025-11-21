@@ -80,6 +80,7 @@ def run_epoch(
     total_samples = 0
     all_probs = []
     all_labels = []
+    skipped_empty_pairs = 0
 
     if (not is_train) and torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -94,6 +95,12 @@ def run_epoch(
                 images = batch["images"].to(model.device, non_blocking=True)
                 pair_idx = batch["pairs"].to(model.device, non_blocking=True)
                 labels = batch["labels"].to(model.device, non_blocking=True).view(-1)
+                # Some scenes can have zero labeled pairs; skip them to avoid indexing errors.
+                if pair_idx.numel() == 0 or labels.numel() == 0:
+                    skipped_empty_pairs += 1
+                    continue
+                if pair_idx.dim() != 2 or pair_idx.shape[1] != 2:
+                    raise ValueError(f"Expected pair_idx shape (P,2), got {pair_idx.shape}")
                 view_embs = model.encode_views(images)
                 logits = model.score_pair_indices(view_embs, pair_idx).view(-1)
             else:
@@ -137,6 +144,9 @@ def run_epoch(
         metrics = {"graph_IOU": float("nan"), "graph_AUC": float("nan")}
 
     metrics["loss"] = avg_loss
+    if skipped_empty_pairs > 0:
+        metrics["skipped_empty_pairs"] = skipped_empty_pairs
+        print(f"[INFO] Skipped {skipped_empty_pairs} batch(es) with no labeled pairs.")
     return metrics
 
 
