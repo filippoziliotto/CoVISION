@@ -399,8 +399,11 @@ class PairImageDataset(Dataset):
 def build_image_pair_dataloaders(
     dataset_type: str,
     batch_size: int,
+    val_batch_size: Optional[int],
     num_workers: int,
-    seed: int,
+    prefetch_factor: Optional[int] = None,
+    persistent_workers: Optional[bool] = None,
+    seed: int = 2026,
     train_ratio: Optional[float],
     split_mode: str,
     split_index_path: Optional[str],
@@ -448,16 +451,20 @@ def build_image_pair_dataloaders(
         device is not None and str(device).startswith("cuda") and torch.cuda.is_available()
     )
     pin_memory = use_cuda_pinning
-    prefetch_factor = 2 if num_workers > 0 else None
+    computed_prefetch = None
+    if num_workers > 0:
+        if prefetch_factor is not None and prefetch_factor > 0:
+            computed_prefetch = prefetch_factor
+    computed_persistent = persistent_workers if persistent_workers is not None else num_workers > 0
     loader_kwargs = dict(
         batch_size=batch_size,
         num_workers=num_workers,
         drop_last=False,
         pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
+        persistent_workers=computed_persistent,
     )
-    if prefetch_factor:
-        loader_kwargs["prefetch_factor"] = prefetch_factor
+    if computed_prefetch:
+        loader_kwargs["prefetch_factor"] = computed_prefetch
 
     train_loader = DataLoader(
         train_dataset,
@@ -466,11 +473,10 @@ def build_image_pair_dataloaders(
     )
     val_loader = None
     if val_dataset is not None:
-        val_loader = DataLoader(
-            val_dataset,
-            shuffle=False,
-            **loader_kwargs,
-        )
+        val_kwargs = dict(loader_kwargs)
+        val_kwargs["batch_size"] = val_batch_size if val_batch_size is not None else batch_size
+        val_kwargs["shuffle"] = False
+        val_loader = DataLoader(val_dataset, **val_kwargs)
 
     meta = dict(
         train_pairs=len(train_dataset),
@@ -605,6 +611,8 @@ def build_multiview_dataloaders(
     seed: int,
     batch_size: int,
     num_workers: int,
+    prefetch_factor: Optional[int] = None,
+    persistent_workers: Optional[bool] = None,
     preprocess_mode: str,
     square_size: int,
     max_pairs_per_scene: int,
@@ -646,17 +654,21 @@ def build_multiview_dataloaders(
         device is not None and str(device).startswith("cuda") and torch.cuda.is_available()
     )
     pin_memory = use_cuda_pinning
-    prefetch_factor = 2 if num_workers > 0 else None
+    computed_prefetch = None
+    if num_workers > 0:
+        if prefetch_factor is not None and prefetch_factor > 0:
+            computed_prefetch = prefetch_factor
+    computed_persistent = persistent_workers if persistent_workers is not None else num_workers > 0
     loader_kwargs = dict(
         batch_size=batch_size,
         num_workers=num_workers,
         drop_last=False,
         pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
+        persistent_workers=computed_persistent,
         collate_fn=collate_scene,
     )
-    if prefetch_factor:
-        loader_kwargs["prefetch_factor"] = prefetch_factor
+    if computed_prefetch:
+        loader_kwargs["prefetch_factor"] = computed_prefetch
 
     train_loader = DataLoader(
         train_ds,

@@ -88,6 +88,7 @@ def run_epoch(
     grad_ctx = torch.enable_grad() if is_train else torch.no_grad()
     loop_desc = "Train" if is_train else "Eval"
     progress = tqdm(loader, desc=loop_desc, leave=False)
+    use_autocast = (not multiview) and str(model.device).startswith("cuda") and torch.cuda.is_available()
 
     with grad_ctx:
         for step, batch in enumerate(progress, start=1):
@@ -107,9 +108,12 @@ def run_epoch(
                 images = batch["images"].to(model.device, non_blocking=True)
                 labels = batch["label"].to(model.device, non_blocking=True).view(-1)
 
-                outputs = model(images)
-                logits = outputs["logits"].view(-1)
-            loss = criterion(logits, labels)
+                with torch.cuda.amp.autocast(enabled=use_autocast):
+                    outputs = model(images)
+                    logits = outputs["logits"].view(-1)
+                    loss = criterion(logits, labels)
+            if multiview:
+                loss = criterion(logits, labels)
 
             if is_train:
                 optimizer.zero_grad(set_to_none=True)
@@ -197,7 +201,10 @@ def main():
             ) = build_image_pair_dataloaders(
                 dataset_type=args.dataset_type,
                 batch_size=args.batch_size,
+                val_batch_size=args.eval_batch_size,
                 num_workers=args.num_workers,
+                prefetch_factor=args.prefetch_factor,
+                persistent_workers=None if not args.disable_persistent_workers else False,
                 seed=args.seed,
                 train_ratio=args.train_ratio,
                 split_mode=args.split_mode,
@@ -229,6 +236,8 @@ def main():
                 seed=args.seed,
                 batch_size=1,
                 num_workers=args.num_workers,
+                prefetch_factor=args.prefetch_factor,
+                persistent_workers=None if not args.disable_persistent_workers else False,
                 preprocess_mode=args.preprocess_mode,
                 square_size=args.square_size,
                 max_pairs_per_scene=args.max_pairs_per_scene,

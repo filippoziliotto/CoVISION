@@ -73,7 +73,24 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         default=518,
         help="Final (H, W) fed to VGGT when preprocess_mode='square'.",
     )
+    parser.add_argument(
+        "--eval_batch_size",
+        type=int,
+        default=None,
+        help="Optional eval batch size; defaults to train batch size when omitted.",
+    )
     parser.add_argument("--batch_size", type=int, default=64, help="Number of image pairs per batch.")
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=1,
+        help="DataLoader prefetch_factor when num_workers > 0 (set <=0 to disable).",
+    )
+    parser.add_argument(
+        "--disable_persistent_workers",
+        action="store_true",
+        help="Disable persistent_workers in DataLoaders (can reduce RAM/CPU pressure).",
+    )
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers.")
     parser.add_argument("--seed", type=int, default=2026, help="Random seed for all RNGs.")
     parser.add_argument(

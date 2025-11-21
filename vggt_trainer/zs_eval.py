@@ -298,7 +298,10 @@ def main():
     ) = build_image_pair_dataloaders(
         dataset_type=args.dataset_type,
         batch_size=args.batch_size,
+        val_batch_size=args.eval_batch_size,
         num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=None if not args.disable_persistent_workers else False,
         seed=args.seed,
         train_ratio=args.train_ratio,
         split_mode=args.split_mode,
