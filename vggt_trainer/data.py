@@ -12,6 +12,8 @@ import os
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
+import json
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -120,6 +122,7 @@ def _split_meta(
     seed: int,
     train_ratio: float,
     split_mode: str,
+    split_index_path: Optional[str] = None,
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]], Dict[str, Sequence[str]]]:
     """Split meta entries deterministically according to split_mode."""
     if not meta:
@@ -130,7 +133,19 @@ def _split_meta(
         if "base_scene" not in item:
             item["base_scene"] = item["scene_version"].split("-")[0]
 
-    if split_mode == "scene_disjoint":
+    if split_index_path and os.path.isfile(split_index_path):
+        with open(split_index_path, "r") as f:
+            js = json.load(f)
+        if "train" not in js or "val" not in js:
+            raise ValueError(f"Split index at {split_index_path} missing 'train'/'val' keys.")
+        train_keys = {(d["scene_version"], str(d["split_id"])) for d in js["train"]}
+        val_keys = {(d["scene_version"], str(d["split_id"])) for d in js["val"]}
+        train_meta = [m for m in meta if (m["scene_version"], m["split_id"]) in train_keys]
+        val_meta = [m for m in meta if (m["scene_version"], m["split_id"]) in val_keys]
+        train_scenes = {m["base_scene"] for m in train_meta}
+        val_scenes = {m["base_scene"] for m in val_meta}
+        print(f"[DATA] Loaded split index from {split_index_path}")
+    elif split_mode == "scene_disjoint":
         scenes = sorted({m["base_scene"] for m in meta})
         rng.shuffle(scenes)
         pivot = max(1, int(len(scenes) * train_ratio))
@@ -312,19 +327,26 @@ class PairImageDataset(Dataset):
         pairs: List[PairRecord],
         preprocess_mode: str = "square",
         square_size: int = 518,
+        cache_images: bool = True,
+        max_cache_items: int = 0,
     ):
         if not pairs:
             raise RuntimeError("PairImageDataset cannot be instantiated with zero samples.")
         self.pairs = pairs
         self.preprocess_mode = preprocess_mode
         self.square_size = square_size
-        self._image_cache: Dict[str, torch.Tensor] = {}
+        self.cache_images = cache_images
+        self.max_cache_items = max_cache_items
+        self._image_cache: "OrderedDict[str, torch.Tensor]" = OrderedDict() if cache_images else None
         self._depth_cache = {}
 
     def _load_single_image(self, path: str) -> torch.Tensor:
         """Load and preprocess a single image, caching the result."""
-        if path in self._image_cache:
-            return self._image_cache[path]
+        if self.cache_images and path in self._image_cache:
+            # Move to the end to keep LRU ordering.
+            tensor = self._image_cache.pop(path)
+            self._image_cache[path] = tensor
+            return tensor
 
         if self.preprocess_mode == "square":
             imgs, _ = load_and_preprocess_images_square([path], target_size=self.square_size)
@@ -334,7 +356,11 @@ class PairImageDataset(Dataset):
             imgs = _resize_pair_to_square(imgs, self.square_size)
             tensor = imgs[0]
 
-        self._image_cache[path] = tensor
+        if self.cache_images:
+            self._image_cache[path] = tensor
+            # If max_cache_items > 0, evict the oldest entry when exceeding the limit.
+            if self.max_cache_items > 0 and len(self._image_cache) > self.max_cache_items:
+                self._image_cache.popitem(last=False)
         return tensor
 
     def __len__(self) -> int:
@@ -377,25 +403,41 @@ def build_image_pair_dataloaders(
     seed: int,
     train_ratio: Optional[float],
     split_mode: str,
+    split_index_path: Optional[str],
     preprocess_mode: str,
     square_size: int,
     max_pairs_per_split: int,
 ) -> Tuple[DataLoader, Optional[DataLoader], PairImageDataset, Optional[PairImageDataset], Dict]:
     """Entry point used by the training script."""
     train_ratio = _default_train_ratio(dataset_type, train_ratio)
+    index_ratio = 0.8 if dataset_type == "gibson" else 0.9
+    default_split_index = f"dataset/splits/pairview/pairview_{dataset_type}_{seed}_{index_ratio:.1f}.json"
+    split_index_path = split_index_path or default_split_index
+    if not os.path.isfile(split_index_path):
+        split_index_path = None
     split_meta = _discover_scene_splits(dataset_type)
-    train_meta, val_meta, stats = _split_meta(split_meta, seed, train_ratio, split_mode)
+    train_meta, val_meta, stats = _split_meta(
+        split_meta, seed, train_ratio, split_mode, split_index_path=split_index_path
+    )
 
     train_pairs = _load_pairs_for_meta(train_meta, max_pairs_per_split, seed)
     # Keep validation untouched: do not subsample pairs for held-out metrics.
     val_pairs = _load_pairs_for_meta(val_meta, -1, seed + 1) if val_meta else []
 
+    # Caching images in each worker can explode RAM; keep caching only when single-process loading.
+    cache_images = num_workers == 0
     train_dataset = PairImageDataset(
-        train_pairs, preprocess_mode=preprocess_mode, square_size=square_size
+        train_pairs,
+        preprocess_mode=preprocess_mode,
+        square_size=square_size,
+        cache_images=cache_images,
     )
     val_dataset = (
         PairImageDataset(
-            val_pairs, preprocess_mode=preprocess_mode, square_size=square_size
+            val_pairs,
+            preprocess_mode=preprocess_mode,
+            square_size=square_size,
+            cache_images=cache_images,
         )
         if val_pairs
         else None
@@ -433,6 +475,7 @@ def build_image_pair_dataloaders(
         val_scenes=len(stats["val_scenes"]),
         train_ratio=train_ratio,
         split_mode=split_mode,
+        split_index_path=split_index_path or "",
     )
 
     print(
@@ -553,7 +596,7 @@ class MultiViewSceneDataset(Dataset):
 
 def build_multiview_dataloaders(
     dataset_type: str,
-    train_ratio: float,
+    train_ratio: Optional[float],
     split_mode: str,
     seed: int,
     batch_size: int,
@@ -561,10 +604,19 @@ def build_multiview_dataloaders(
     preprocess_mode: str,
     square_size: int,
     max_pairs_per_scene: int,
+    split_index_path: Optional[str] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
     """Build train/val dataloaders for multiview training (one scene per batch)."""
+    train_ratio = _default_train_ratio(dataset_type, train_ratio)
+    index_ratio = 0.8 if dataset_type == "gibson" else 0.9
+    default_split_index = f"dataset/splits/multiview/multiview_{seed}_{index_ratio:.1f}.json"
+    split_index_path = split_index_path or default_split_index
+    if not os.path.isfile(split_index_path):
+        split_index_path = None
     split_meta = _discover_scene_splits(dataset_type)
-    train_meta, val_meta, stats = _split_meta(split_meta, seed, train_ratio, split_mode)
+    train_meta, val_meta, stats = _split_meta(
+        split_meta, seed, train_ratio, split_mode, split_index_path=split_index_path
+    )
 
     train_ds = MultiViewSceneDataset(
         train_meta,
@@ -617,5 +669,6 @@ def build_multiview_dataloaders(
         train_ratio=train_ratio,
         split_mode=split_mode,
         max_pairs_per_scene=max_pairs_per_scene,
+        split_index_path=split_index_path or "",
     )
     return train_loader, val_loader, meta

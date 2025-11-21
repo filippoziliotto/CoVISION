@@ -32,8 +32,8 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--train_ratio",
         type=float,
-        default=0.8,
-        help="Train split ratio. Leave empty to use 0.8 for Gibson and 0.9 for HM3D.",
+        default=None,
+        help="Train split ratio. When omitted, uses 0.8 for Gibson and 0.9 for HM3D.",
     )
     parser.add_argument(
         "--split_mode",
@@ -41,6 +41,12 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         default="scene_disjoint",
         choices=["scene_disjoint", "version_disjoint", "graph"],
         help="How to partition splits between train and val.",
+    )
+    parser.add_argument(
+        "--split_index_path",
+        type=str,
+        default="",
+        help="Optional JSON split index to reuse deterministic train/val splits (defaults to dataset/splits/*).",
     )
     parser.add_argument(
         "--max_pairs_per_split",
@@ -167,7 +173,7 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wandb_project",
         type=str,
-        default=None,
+        default="Co-Vision",
         help="Weights & Biases project name (set None to disable).",
     )
     parser.add_argument(
@@ -186,6 +192,12 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only train on the training set without running validation.",
     )
+    # Useless but for wandb compatibility
+    parser.add_argument(
+        "--zero_shot",
+        action="store_true",
+        help="No effect; only for wandb compatibility.",
+    ) # default=False
 
     return parser
 

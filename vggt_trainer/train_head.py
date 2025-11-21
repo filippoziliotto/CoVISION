@@ -199,8 +199,9 @@ def main():
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 seed=args.seed,
-                train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
+                train_ratio=args.train_ratio,
                 split_mode=args.split_mode,
+                split_index_path=args.split_index_path or None,
                 preprocess_mode=args.preprocess_mode,
                 square_size=args.square_size,
                 max_pairs_per_split=args.max_pairs_per_split,
@@ -222,7 +223,7 @@ def main():
         else:
             train_loader, val_loader, meta = build_multiview_dataloaders(
                 dataset_type=args.dataset_type,
-                train_ratio=0.8 if args.dataset_type == "gibson" else 0.9,
+                train_ratio=args.train_ratio,
                 split_mode=args.split_mode,
                 seed=args.seed,
                 batch_size=1,
@@ -230,6 +231,7 @@ def main():
                 preprocess_mode=args.preprocess_mode,
                 square_size=args.square_size,
                 max_pairs_per_scene=args.max_pairs_per_scene,
+                split_index_path=args.split_index_path or None,
             )
             train_dataset = None
             val_dataset = None
@@ -322,7 +324,8 @@ def main():
                 step=epoch,
             )
 
-            if not args.skip_eval and val_loader is not None and val_dataset is not None:
+            if not args.skip_eval and val_loader is not None:
+                # Allow validation whenever a loader exists (multiview sets val_dataset=None).
                 val_metrics = run_epoch(
                     model=model,
                     loader=val_loader,

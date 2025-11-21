@@ -302,6 +302,7 @@ def main():
         seed=args.seed,
         train_ratio=args.train_ratio,
         split_mode=args.split_mode,
+        split_index_path=args.split_index_path or None,
         preprocess_mode=args.preprocess_mode,
         square_size=args.square_size,
         max_pairs_per_split=args.max_pairs_per_split,
