@@ -407,6 +407,7 @@ def build_image_pair_dataloaders(
     preprocess_mode: str,
     square_size: int,
     max_pairs_per_split: int,
+    device: Optional[str] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], PairImageDataset, Optional[PairImageDataset], Dict]:
     """Entry point used by the training script."""
     train_ratio = _default_train_ratio(dataset_type, train_ratio)
@@ -443,7 +444,10 @@ def build_image_pair_dataloaders(
         else None
     )
 
-    pin_memory = torch.cuda.is_available()
+    use_cuda_pinning = (
+        device is not None and str(device).startswith("cuda") and torch.cuda.is_available()
+    )
+    pin_memory = use_cuda_pinning
     prefetch_factor = 2 if num_workers > 0 else None
     loader_kwargs = dict(
         batch_size=batch_size,
@@ -605,6 +609,7 @@ def build_multiview_dataloaders(
     square_size: int,
     max_pairs_per_scene: int,
     split_index_path: Optional[str] = None,
+    device: Optional[str] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
     """Build train/val dataloaders for multiview training (one scene per batch)."""
     train_ratio = _default_train_ratio(dataset_type, train_ratio)
@@ -637,7 +642,10 @@ def build_multiview_dataloaders(
         else None
     )
 
-    pin_memory = torch.cuda.is_available()
+    use_cuda_pinning = (
+        device is not None and str(device).startswith("cuda") and torch.cuda.is_available()
+    )
+    pin_memory = use_cuda_pinning
     prefetch_factor = 2 if num_workers > 0 else None
     loader_kwargs = dict(
         batch_size=batch_size,

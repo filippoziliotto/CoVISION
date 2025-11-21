@@ -306,6 +306,7 @@ def main():
         preprocess_mode=args.preprocess_mode,
         square_size=args.square_size,
         max_pairs_per_split=args.max_pairs_per_split,
+        device=device,
     )
 
     print(

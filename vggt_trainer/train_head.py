@@ -205,6 +205,7 @@ def main():
                 preprocess_mode=args.preprocess_mode,
                 square_size=args.square_size,
                 max_pairs_per_split=args.max_pairs_per_split,
+                device=device,
             )
             print(
                 f"[DATA] Loaded {meta['train_pairs']} train pairs "
@@ -232,6 +233,7 @@ def main():
                 square_size=args.square_size,
                 max_pairs_per_scene=args.max_pairs_per_scene,
                 split_index_path=args.split_index_path or None,
+                device=device,
             )
             train_dataset = None
             val_dataset = None
