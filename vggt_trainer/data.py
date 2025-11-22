@@ -12,13 +12,23 @@ import os
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
+import argparse
 import json
 from collections import OrderedDict
+from pathlib import Path
+import sys
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+
+# Ensure repository root (and bundled vggt submodule) is importable.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+if str(REPO_ROOT / "vggt") not in sys.path:
+    sys.path.append(str(REPO_ROOT / "vggt"))
 
 from vggt.vggt.utils.load_fn import (
     load_and_preprocess_images,
@@ -757,3 +767,96 @@ def build_multiview_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
         split_index_path=args.split_index_path or None,
         device=str(device) if device is not None else None,
     )
+
+
+def _cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Lightweight sanity check for VGGT trainer dataloaders.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--mode", choices=["pairwise", "multiview"], default="pairwise")
+    parser.add_argument("--dataset_type", choices=["gibson", "hm3d"], default="gibson")
+    parser.add_argument("--square_size", type=int, default=518)
+    parser.add_argument("--preprocess_mode", choices=["square", "crop", "pad"], default="square")
+    parser.add_argument("--split_mode", choices=["scene_disjoint", "version_disjoint", "graph"], default="scene_disjoint")
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--max_pairs_per_split", type=int, default=64, help="Pairwise: cap pairs per split for the preview run.")
+    parser.add_argument("--max_pairs_per_scene", type=int, default=64, help="Multiview: cap pairs per scene for the preview run.")
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--prefetch_factor", type=int, default=1)
+    parser.add_argument("--disable_persistent_workers", action="store_true")
+    parser.add_argument("--sample", action="store_true", help="Fetch one batch and print tensor shapes.")
+    return parser.parse_args()
+
+
+def main():
+    """Provide a simple CLI to probe dataloader construction and shapes."""
+    args = _cli_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    args.mode = "multiview"  # For testing multiview loader; remove to test pairwise.
+
+
+    try:
+        if args.mode == "pairwise":
+            train_loader, val_loader, train_ds, val_ds, meta = build_image_pair_dataloaders(
+                dataset_type=args.dataset_type,
+                batch_size=8,
+                val_batch_size=8,
+                num_workers=args.num_workers,
+                seed=args.seed,
+                train_ratio=None,
+                split_mode=args.split_mode,
+                split_index_path=None,
+                preprocess_mode=args.preprocess_mode,
+                square_size=args.square_size,
+                max_pairs_per_split=args.max_pairs_per_split,
+                device=str(device),
+                prefetch_factor=args.prefetch_factor,
+                persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+            )
+            print(f"[INFO] Pairwise loader ready | train_pairs={meta['train_pairs']}, val_pairs={meta['val_pairs']}")
+            loader = train_loader
+        else:
+            train_loader, val_loader, meta = build_multiview_dataloaders(
+                dataset_type=args.dataset_type,
+                train_ratio=None,
+                split_mode=args.split_mode,
+                seed=args.seed,
+                batch_size=1,
+                num_workers=args.num_workers,
+                prefetch_factor=args.prefetch_factor,
+                persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+                preprocess_mode=args.preprocess_mode,
+                square_size=args.square_size,
+                max_pairs_per_scene=args.max_pairs_per_scene,
+                split_index_path=None,
+                device=str(device),
+            )
+            print(
+                f"[INFO] Multiview loader ready | train_scenes={meta['train_scenes']}, "
+                f"val_scenes={meta['val_scenes']}, max_pairs_per_scene={meta['max_pairs_per_scene']}"
+            )
+            loader = train_loader
+
+        if loader is not None:
+            sample = next(iter(loader))
+            if args.mode == "pairwise":
+                print(
+                    f"[SAMPLE] images={tuple(sample['images'].shape)}, "
+                    f"label_shape={tuple(sample['label'].shape)}"
+                )
+            else:
+                print(
+                    f"[SAMPLE] images={tuple(sample['images'].shape)}, "
+                    f"pairs={tuple(sample['pairs'].shape)}, labels={tuple(sample['labels'].shape)}"
+                )
+        elif loader is None:
+            print("[WARN] No loader constructed (empty validation split?).")
+    except Exception as exc:
+        print(f"[ERROR] Failed to build dataloaders: {exc}")
+        raise
+
+
+if __name__ == "__main__":
+    main()

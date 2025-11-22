@@ -4,10 +4,20 @@ VGGT backbone + lightweight classification head that is optimised directly on RG
 """
 from __future__ import annotations
 
+import argparse
 from typing import Dict, Iterable, List, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
+
+# Ensure repository root (and bundled vggt submodule) is importable.
+import sys
+from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+if str(REPO_ROOT / "vggt") not in sys.path:
+    sys.path.append(str(REPO_ROOT / "vggt"))
 
 from vggt.vggt.models.vggt import VGGT
 
@@ -74,6 +84,17 @@ def _resolve_layer_indices(layer_mode: str, num_layers: int) -> Optional[Union[i
         f"Expected {{'all', '1st_last', '2nd_last', '3rd_last', '4th_last', 'last_stages', 'mid_to_last_stages'}}."
     )
 
+def _resolve_torch_dtype(name: str) -> Optional[torch.dtype]:
+    """Map a friendly dtype string to a torch dtype; returns None for fp32."""
+    name = name.lower()
+    if name == "fp32":
+        return None
+    if name == "fp16":
+        return torch.float16
+    if name == "bf16":
+        return torch.bfloat16
+    raise ValueError(f"Unsupported backbone dtype '{name}'. Expected one of ['fp32', 'fp16', 'bf16'].")
+
 
 class PairwiseHead(nn.Module):
     """Simple MLP head operating on concatenated pair embeddings."""
@@ -121,6 +142,7 @@ class VGGTHeadModel(nn.Module):
     def __init__(
         self,
         backbone_ckpt: str = "facebook/VGGT-1B",
+        backbone_dtype: str = "fp32",
         device: Optional[str] = None,
         layer_mode: str = "all",
         head_hidden_dim: int = 512,
@@ -133,6 +155,7 @@ class VGGTHeadModel(nn.Module):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
+        self.backbone_dtype = backbone_dtype
         self.layer_mode = layer_mode
         self.head_hidden_dim = head_hidden_dim
         self.head_dropout = head_dropout
@@ -140,8 +163,15 @@ class VGGTHeadModel(nn.Module):
         self.summary_tokens = summary_tokens
         self.summary_heads = summary_heads
 
-        print(f"[MODEL] Loading VGGT backbone '{backbone_ckpt}' on {self.device}...")
-        self.backbone = VGGT.from_pretrained(backbone_ckpt).to(self.device)
+        dtype = _resolve_torch_dtype(backbone_dtype)
+        dtype_desc = "fp32" if dtype is None else str(dtype)
+        print(f"[MODEL] Loading VGGT backbone '{backbone_ckpt}' on {self.device} (dtype={dtype_desc})...")
+        load_kwargs = {"map_location": self.device}
+        if dtype is not None:
+            load_kwargs["torch_dtype"] = dtype
+        self.backbone = VGGT.from_pretrained(backbone_ckpt, **load_kwargs).to(self.device)
+        if dtype is not None:
+            self.backbone = self.backbone.to(dtype=dtype)
         self.backbone.eval()
         for param in self.backbone.parameters():
             param.requires_grad_(False)
@@ -523,5 +553,129 @@ class VGGTHeadModel(nn.Module):
         if "token_summarizer" in state_dict and self.token_summarizer is not None:
             self.token_summarizer.load_state_dict(state_dict["token_summarizer"])
 
+def _parse_pair_indices_cli(raw_pairs: Optional[Sequence[str]], num_views: int) -> Optional[torch.Tensor]:
+    """Parse CLI-friendly pair specs like ['0-1', '0,2'] into a tensor."""
+    if not raw_pairs:
+        return None
+    parsed = []
+    for spec in raw_pairs:
+        cleaned = spec.replace("-", ",")
+        parts = [p for p in cleaned.split(",") if p != ""]
+        if len(parts) != 2:
+            raise ValueError(f"Invalid pair spec '{spec}'. Use forms like '0-1' or '0,1'.")
+        i, j = int(parts[0]), int(parts[1])
+        if i < 0 or j < 0 or i >= num_views or j >= num_views:
+            raise ValueError(f"Pair indices {i},{j} out of range for num_views={num_views}.")
+        parsed.append((i, j))
+    return torch.tensor(parsed, dtype=torch.long)
+
+
+def main():
+    """
+    Minimal CLI to sanity check VGGTHeadModel forward and pair scoring with random tensors.
+    This will still load the specified VGGT backbone; ensure weights are available locally.
+    """
+    parser = argparse.ArgumentParser(
+        description="Smoke-test VGGTHeadModel with random inputs.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--backbone_ckpt", type=str, default="facebook/VGGT-1B")
+    parser.add_argument("--backbone_dtype", type=str, default="fp32", choices=["fp32", "fp16", "bf16"])
+    parser.add_argument("--device", type=str, default=None, help="cuda, cuda:0, mps, or cpu.")
+    parser.add_argument(
+        "--layer_mode",
+        type=str,
+        default="all",
+        choices=[
+            "all",
+            "1st_last",
+            "2nd_last",
+            "3rd_last",
+            "4th_last",
+            "last_stages",
+            "mid_to_last_stages",
+        ],
+    )
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--num_views", type=int, default=2)
+    parser.add_argument("--square_size", type=int, default=256)
+    parser.add_argument(
+        "--dtype",
+        choices=["float32", "float16", "bfloat16", "bf16"],
+        default="float32",
+        help="Random input tensor dtype for the smoke test.",
+    )
+    parser.add_argument("--head_hidden_dim", type=int, default=512)
+    parser.add_argument("--head_dropout", type=float, default=0.2)
+    parser.add_argument("--token_proj_dim", type=int, default=256)
+    parser.add_argument("--summary_tokens", type=int, default=8)
+    parser.add_argument("--summary_heads", type=int, default=4)
+    parser.add_argument("--pair_indices", nargs="*", help="Optional pairs like '0-1 0-2'. Required when num_views>2.")
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
+
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
+    device = torch.device(args.device) if args.device else torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    if args.dtype == "float16":
+        dtype = torch.float16
+    elif args.dtype in ("bfloat16", "bf16"):
+        dtype = torch.bfloat16
+    else:
+        dtype = torch.float32
+
+    pair_idx = _parse_pair_indices_cli(args.pair_indices, args.num_views)
+    if pair_idx is None and args.num_views != 2:
+        raise ValueError("Provide --pair_indices when using more than two views.")
+
+    print(
+        f"[INFO] Initialising VGGTHeadModel on {device} "
+        f"(backbone={args.backbone_ckpt}, dtype={args.backbone_dtype})"
+    )
+    try:
+        model = VGGTHeadModel(
+            backbone_ckpt=args.backbone_ckpt,
+            backbone_dtype=args.backbone_dtype,
+            device=str(device),
+            layer_mode=args.layer_mode,
+            head_hidden_dim=args.head_hidden_dim,
+            head_dropout=args.head_dropout,
+            token_proj_dim=args.token_proj_dim,
+            summary_tokens=args.summary_tokens,
+            summary_heads=args.summary_heads,
+        )
+    except Exception as exc:
+        print(f"[ERROR] Failed to load VGGTHeadModel: {exc}")
+        raise
+
+    images = torch.randn(
+        args.batch_size,
+        args.num_views,
+        3,
+        518,
+        518,
+        device=device,
+        dtype=dtype,
+    )
+
+    logits = model.score_pairs(images, pair_indices=pair_idx)
+    print(
+        f"[OK] Forward success | logits shape={tuple(logits.shape)}, "
+        f"dtype={logits.dtype}, device={logits.device}"
+    )
+    if model.head is not None:
+        print(
+            f"[INFO] Head params={sum(p.numel() for p in model.head.parameters()):,}, "
+            f"trainable={sum(p.numel() for p in model.head.parameters() if p.requires_grad):,}"
+        )
+
 
 __all__ = ["PairwiseHead", "VGGTHeadModel"]
+
+
+if __name__ == "__main__":
+    main()

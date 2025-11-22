@@ -136,6 +136,13 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         help="Identifier passed to VGGT.from_pretrained.",
     )
     parser.add_argument(
+        "--backbone_dtype",
+        type=str,
+        default="fp32",
+        choices=["fp32", "fp16", "bf16"],
+        help="Precision for loading the VGGT backbone weights.",
+    )
+    parser.add_argument(
         "--token_proj_dim",
         type=int,
         default=256,

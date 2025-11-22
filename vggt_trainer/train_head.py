@@ -249,6 +249,7 @@ def main():
 
         model = VGGTHeadModel(
             backbone_ckpt=args.backbone_ckpt,
+            backbone_dtype=args.backbone_dtype,
             device=str(device),
             layer_mode=args.layer_mode,
             head_hidden_dim=args.head_hidden_dim,

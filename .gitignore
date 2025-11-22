@@ -12,6 +12,7 @@ TODO.md
 slurm/
 logs/
 dataset/splits/
+runs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
