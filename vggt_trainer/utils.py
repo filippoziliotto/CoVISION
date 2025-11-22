@@ -43,6 +43,20 @@ def ensure_dir(path: Union[str, Path]) -> Path:
     return target
 
 
+def configure_torch_multiprocessing(num_workers: int, strategy: str = "file_system") -> None:
+    """
+    Use a file-backed sharing strategy when dataloader workers are enabled to avoid
+    shared-memory exhaustion on constrained systems (e.g., small /dev/shm).
+    """
+    if num_workers <= 0:
+        return
+    try:
+        torch.multiprocessing.set_sharing_strategy(strategy)
+    except (RuntimeError, ValueError):
+        # Best effort; fall back to the default strategy.
+        pass
+
+
 def compute_graph_metrics(probs: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
     """
     Compute the graph IoU metrics used during training loops.
@@ -80,6 +94,7 @@ def count_parameters(model: torch.nn.Module, head: Optional[torch.nn.Module]) ->
 
 
 __all__ = [
+    "configure_torch_multiprocessing",
     "compute_graph_metrics",
     "count_parameters",
     "ensure_dir",

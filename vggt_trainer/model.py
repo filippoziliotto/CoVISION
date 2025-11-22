@@ -152,6 +152,12 @@ class VGGTHeadModel(nn.Module):
         self.token_proj_norm: Optional[nn.LayerNorm] = None
         self.token_summarizer: Optional[TokenSummarizer] = None
 
+    def _ensure_batch_dim(self, images: torch.Tensor) -> torch.Tensor:
+        """Guarantee a batch dimension for downstream encoding."""
+        if images.dim() == 4:
+            images = images.unsqueeze(0)
+        return images
+
     def train(self, mode: bool = True):
         """Override to keep VGGT frozen regardless of optimizer mode."""
         super().train(mode)
@@ -238,6 +244,117 @@ class VGGTHeadModel(nn.Module):
         stacked = torch.stack(flattened_layers, dim=1)  # (B, L, S, D_flat)
         return stacked
 
+    def _extract_view_embeddings(
+        self,
+        images: torch.Tensor,
+        *,
+        select_layers: bool = True,
+        keep_batch: bool = True,
+    ) -> torch.Tensor:
+        """
+        Run VGGT and return per-view embeddings in view-major order.
+
+        Returns:
+            (B, S, L, D) when multiple layers are selected,
+            (B, S, D) when a single layer is selected.
+            The batch dimension is squeezed out when keep_batch is False.
+        """
+        images = self._ensure_batch_dim(images.to(self.device))
+
+        with torch.no_grad():
+            predictions = self.backbone(images, extract_features=True)
+            if "features_all" not in predictions:
+                raise RuntimeError("VGGT outputs do not include 'features_all'.")
+            raw_layers = [feat.detach() for feat in predictions["features_all"]]
+
+        embeddings = self._compute_layer_embeddings(raw_layers)  # (B, L, S, D)
+        if select_layers:
+            embeddings = self._select_layers(embeddings)
+
+        view_first = embeddings.permute(0, 2, 1, 3)  # (B, S, L, D)
+        if view_first.shape[2] == 1:
+            view_first = view_first[:, :, 0, :]  # (B, S, D)
+
+        if not keep_batch:
+            if view_first.shape[0] != 1:
+                raise ValueError(
+                    f"Expected a single batch element when keep_batch=False, got {view_first.shape[0]}"
+                )
+            view_first = view_first.squeeze(0)
+        return view_first
+
+    def _normalize_pair_indices(
+        self, pair_indices: Optional[torch.Tensor], batch_size: int, num_views: int
+    ) -> torch.Tensor:
+        """
+        Standardise pair_indices to shape (B, P, 2), broadcasting when needed.
+        If pair_indices is None, default to the single pair (0, 1) for two-view inputs.
+        """
+        if pair_indices is None:
+            if num_views != 2:
+                raise ValueError(
+                    "pair_indices must be provided when passing more than two views."
+                )
+            pair_indices = torch.tensor([[0, 1]], device=self.device)
+
+        if not torch.is_tensor(pair_indices):
+            pair_indices = torch.as_tensor(pair_indices, device=self.device)
+        else:
+            pair_indices = pair_indices.to(self.device)
+
+        if pair_indices.dim() == 2:
+            pair_indices = pair_indices.unsqueeze(0).expand(batch_size, -1, -1)
+        elif pair_indices.dim() == 3:
+            if pair_indices.shape[0] == 1 and batch_size > 1:
+                pair_indices = pair_indices.expand(batch_size, -1, -1)
+            elif pair_indices.shape[0] != batch_size:
+                raise ValueError(
+                    f"pair_indices batch dimension {pair_indices.shape[0]} does not "
+                    f"match images batch size {batch_size}."
+                )
+        else:
+            raise ValueError(
+                f"pair_indices must have shape (P,2) or (B,P,2); got {pair_indices.shape}"
+            )
+
+        if pair_indices.shape[-1] != 2:
+            raise ValueError(f"pair_indices last dimension must be 2, got {pair_indices.shape}")
+        return pair_indices
+
+    def _gather_pair_embeddings(
+        self, view_embeddings: torch.Tensor, pair_indices: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Collect per-pair embeddings from view-major tensors.
+
+        view_embeddings: (B, S, D) or (B, S, L, D)
+        pair_indices: (B, P, 2)
+        Returns:
+            emb_i, emb_j flattened across the batch (shapes match head expectations).
+        """
+        if view_embeddings.dim() not in (3, 4):
+            raise ValueError(f"Unexpected view_embeddings shape {view_embeddings.shape}")
+
+        batch_emb_i: List[torch.Tensor] = []
+        batch_emb_j: List[torch.Tensor] = []
+
+        for b in range(view_embeddings.shape[0]):
+            idx = pair_indices[b]
+            if idx.numel() == 0:
+                continue
+            views_b = view_embeddings[b]
+            emb_i = views_b.index_select(0, idx[:, 0])
+            emb_j = views_b.index_select(0, idx[:, 1])
+            batch_emb_i.append(emb_i)
+            batch_emb_j.append(emb_j)
+
+        if not batch_emb_i:
+            return torch.empty(0, device=self.device), torch.empty(0, device=self.device)
+
+        emb_i_cat = torch.cat(batch_emb_i, dim=0)
+        emb_j_cat = torch.cat(batch_emb_j, dim=0)
+        return emb_i_cat, emb_j_cat
+
     def _select_layers(self, embeddings: torch.Tensor) -> torch.Tensor:
         """Select subset of layers according to layer_mode."""
         num_layers = embeddings.shape[1]
@@ -251,34 +368,12 @@ class VGGTHeadModel(nn.Module):
 
     def forward(self, images: torch.Tensor) -> dict:
         """
-        images: tensor shaped (B, S, 3, H, W). S must be 2 for pairwise training.
+        images: tensor shaped (B, S, 3, H, W) or (S, 3, H, W).
+        For pairwise training, S should be 2 and the single pair (0, 1) is scored.
         Returns:
-            {"logits": (B,) tensor}
+            {"logits": (num_pairs_total,) tensor}
         """
-        if images.dim() == 4:
-            images = images.unsqueeze(0)
-        if images.size(1) != 2:
-            raise ValueError(f"VGGTHeadModel expects exactly 2 views, got {images.size(1)}.")
-        images = images.to(self.device)
-
-        with torch.no_grad():
-            predictions = self.backbone(images, extract_features=True)
-            if "features_all" not in predictions:
-                raise RuntimeError("VGGT outputs do not include 'features_all'.")
-            raw_layers = [feat.detach() for feat in predictions["features_all"]]
-
-        embeddings = self._compute_layer_embeddings(raw_layers)
-        selected = self._select_layers(embeddings)
-
-        emb_i = selected[:, :, 0, :]
-        emb_j = selected[:, :, 1, :]
-
-        if emb_i.shape[1] == 1:
-            emb_i = emb_i[:, 0, :]
-            emb_j = emb_j[:, 0, :]
-
-        self._init_head_if_needed(emb_dim=emb_i.shape[-1])
-        logits = self.head(emb_i, emb_j)["logits"]
+        logits = self.score_pairs(images, pair_indices=None)
         return {"logits": logits}
 
     def encode_views(self, images: torch.Tensor) -> torch.Tensor:
@@ -286,38 +381,64 @@ class VGGTHeadModel(nn.Module):
         Run VGGT on an arbitrary number of views and return per-view embeddings.
         Returns (S, E) or (S, L, E) depending on layer selection.
         """
-        if images.dim() == 4:
-            images = images.unsqueeze(0)
-        images = images.to(self.device)
-
-        with torch.no_grad():
-            preds = self.backbone(images, extract_features=True)
-            if "features_all" not in preds:
-                raise RuntimeError("VGGT outputs do not include 'features_all'.")
-            raw_layers = [feat.detach() for feat in preds["features_all"]]
-
-        embeddings = self._compute_layer_embeddings(raw_layers)  # (B, L, S, D)
-        selected = self._select_layers(embeddings).squeeze(0)  # (L, S, D)
-        view_first = selected.permute(1, 0, 2)  # (S, L, D)
-        if view_first.shape[1] == 1:
-            view_first = view_first[:, 0, :]
-        return view_first
+        return self._extract_view_embeddings(images, select_layers=True, keep_batch=False)
 
     def score_pair_indices(self, view_embeddings: torch.Tensor, pair_idx: torch.Tensor) -> torch.Tensor:
         """
         Given per-view embeddings and pair indices (P,2), return logits (P,).
         """
+        if pair_idx.dim() == 2:
+            pair_idx = pair_idx.unsqueeze(0)
+        elif pair_idx.dim() != 3:
+            raise ValueError(f"pair_idx must be (P,2) or (B,P,2), got {pair_idx.shape}")
+
         if view_embeddings.dim() == 2:
-            emb_i = view_embeddings[pair_idx[:, 0]]
-            emb_j = view_embeddings[pair_idx[:, 1]]
+            batch_view = view_embeddings.unsqueeze(0)  # (1, S, D)
         elif view_embeddings.dim() == 3:
-            emb_i = view_embeddings[pair_idx[:, 0], ...]
-            emb_j = view_embeddings[pair_idx[:, 1], ...]
+            if pair_idx.shape[0] == view_embeddings.shape[0] and pair_idx.shape[0] > 1:
+                batch_view = view_embeddings  # (B, S, D)
+            else:
+                batch_view = view_embeddings.unsqueeze(0)  # (1, S, L, D) or (1, S, D)
+        elif view_embeddings.dim() == 4:
+            batch_view = view_embeddings  # (B, S, L, D)
         else:
             raise ValueError(f"Unexpected view_embeddings shape {view_embeddings.shape}")
 
+        pair_idx = pair_idx.to(self.device)
+        emb_i, emb_j = self._gather_pair_embeddings(batch_view, pair_idx)
+        if emb_i.numel() == 0:
+            return torch.empty(0, device=self.device)
+
         self._init_head_if_needed(emb_dim=emb_i.shape[-1])
         return self.head(emb_i, emb_j)["logits"]
+
+    def score_pairs(
+        self,
+        images: torch.Tensor,
+        pair_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Score arbitrary image pairs from a set of views.
+        pair_indices:
+            - None: expects exactly two views and scores the single pair (0, 1).
+            - (P, 2): same pairs are applied to every batch element.
+            - (B, P, 2): per-example pair specification.
+        Returns logits flattened across all pairs in the batch.
+        """
+        images = self._ensure_batch_dim(images)
+        batch_size, num_views = images.shape[:2]
+        pair_indices = self._normalize_pair_indices(pair_indices, batch_size, num_views)
+
+        view_embeddings = self._extract_view_embeddings(
+            images, select_layers=True, keep_batch=True
+        )
+        emb_i, emb_j = self._gather_pair_embeddings(view_embeddings, pair_indices)
+        if emb_i.numel() == 0:
+            return torch.empty(0, device=self.device)
+
+        self._init_head_if_needed(emb_dim=emb_i.shape[-1])
+        logits = self.head(emb_i, emb_j)["logits"]
+        return logits
 
     @torch.no_grad()
     def forward_features(self, images: torch.Tensor, select_layers: bool = True) -> Dict[str, torch.Tensor]:
@@ -326,23 +447,21 @@ class VGGTHeadModel(nn.Module):
         before the classification head.
 
         Args:
-            images: (B, S, 3, H, W) tensor or (S, 3, H, W) with S expected to be 2.
+            images: (B, S, 3, H, W) tensor or (S, 3, H, W) with at least two views.
             select_layers: whether to apply layer selection (layer_mode) before
                 returning the embeddings.
 
         Returns:
             {
                 "embeddings": (B, L, S, D),
-                "emb_i": (B, L, D) or (B, D) if a single layer is selected,
-                "emb_j": same shape as emb_i,
+                "emb_i": (B, L, D) or (B, D) if a single layer is selected (first view),
+                "emb_j": same shape as emb_i (second view),
             }
         """
 
-        if images.dim() == 4:
-            images = images.unsqueeze(0)
-        if images.size(1) != 2:
-            raise ValueError(f"VGGTHeadModel expects exactly 2 views, got {images.size(1)}.")
-        images = images.to(self.device)
+        images = self._ensure_batch_dim(images)
+        if images.size(1) < 2:
+            raise ValueError(f"VGGTHeadModel expects at least 2 views, got {images.size(1)}.")
 
         predictions = self.backbone(images, extract_features=True)
         if "features_all" not in predictions:

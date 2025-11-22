@@ -29,7 +29,11 @@ from utils.utils import format_metric_line, plot_iou_curves  # noqa: E402
 from vggt_trainer.args import build_vggt_trainer_parser  # noqa: E402
 from vggt_trainer.data import build_pair_dataloaders_from_args  # noqa: E402
 from vggt_trainer.model import VGGTHeadModel, _resolve_layer_indices  # noqa: E402
-from vggt_trainer.utils import resolve_device, set_seed  # noqa: E402
+from vggt_trainer.utils import (
+    configure_torch_multiprocessing,
+    resolve_device,
+    set_seed,
+)  # noqa: E402
 
 
 def _empty_metrics() -> Dict[str, float]:
@@ -289,6 +293,7 @@ def main():
     args = parser.parse_args()
 
     set_seed(args.seed)
+    configure_torch_multiprocessing(args.num_workers)
     device = resolve_device(args.device)
     print(f"[SETUP] Using device {device}")
 

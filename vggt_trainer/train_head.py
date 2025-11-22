@@ -24,6 +24,7 @@ from vggt_trainer.data import (
 )
 from vggt_trainer.model import VGGTHeadModel
 from vggt_trainer.utils import (
+    configure_torch_multiprocessing,
     compute_graph_metrics,
     count_parameters,
     ensure_dir,
@@ -61,8 +62,8 @@ def run_epoch(
 
     with grad_ctx:
         for step, batch in enumerate(progress, start=1):
+            images = batch["images"].to(model.device, non_blocking=True)
             if multiview:
-                images = batch["images"].to(model.device, non_blocking=True)
                 pair_idx = batch["pairs"].to(model.device, non_blocking=True)
                 labels = batch["labels"].to(model.device, non_blocking=True).view(-1)
                 # Some scenes can have zero labeled pairs; skip them to avoid indexing errors.
@@ -71,17 +72,15 @@ def run_epoch(
                     continue
                 if pair_idx.dim() != 2 or pair_idx.shape[1] != 2:
                     raise ValueError(f"Expected pair_idx shape (P,2), got {pair_idx.shape}")
-                view_embs = model.encode_views(images)
-                logits = model.score_pair_indices(view_embs, pair_idx).view(-1)
             else:
-                images = batch["images"].to(model.device, non_blocking=True)
+                pair_idx = None
                 labels = batch["label"].to(model.device, non_blocking=True).view(-1)
 
-                with torch.cuda.amp.autocast(enabled=use_autocast):
-                    outputs = model(images)
-                    logits = outputs["logits"].view(-1)
-                    loss = criterion(logits, labels)
-            if multiview:
+            with torch.cuda.amp.autocast(enabled=use_autocast):
+                logits = model.score_pairs(images, pair_indices=pair_idx).view(-1)
+                if logits.numel() == 0:
+                    skipped_empty_pairs += 1
+                    continue
                 loss = criterion(logits, labels)
 
             if is_train:
@@ -238,6 +237,7 @@ def main():
     )
 
     try:
+        configure_torch_multiprocessing(args.num_workers)
         device = resolve_device(args.device)
         print(f"[SETUP] Using device {device}")
 

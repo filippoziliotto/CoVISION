@@ -8,4 +8,9 @@ from .data import (
     build_pair_dataloaders_from_args,
 )
 from .model import VGGTHeadModel
-from .utils import compute_graph_metrics, resolve_device, set_seed  # noqa: F401
+from .utils import (  # noqa: F401
+    compute_graph_metrics,
+    configure_torch_multiprocessing,
+    resolve_device,
+    set_seed,
+)
