@@ -24,6 +24,7 @@ from vggt_trainer.data import (
     build_precomputed_dataloaders_from_args,
 )
 from vggt_trainer.model import VGGTHeadModel
+from vggt_trainer.transform import CoVggtAug
 from vggt_trainer.utils import (
     configure_torch_multiprocessing,
     compute_graph_metrics,
@@ -33,6 +34,18 @@ from vggt_trainer.utils import (
     set_seed,
 )
 from utils.utils import setup_wandb, wandb_finish, wandb_log, wandb_save
+
+
+def _train_augmentation_from_args(args) -> Optional[CoVggtAug]:
+    """Build the training-time augmentation pipeline from CLI args."""
+    aug = CoVggtAug(
+        pair_permutation_p=args.aug_pair_permutation_p,
+        pair_keep_ratio=args.aug_pair_keep_ratio,
+        hflip_p=args.aug_hflip_p,
+        color_jitter=args.aug_color_jitter,
+        gaussian_noise_std=args.aug_noise_std,
+    )
+    return None if aug.is_noop else aug
 
 
 def run_epoch(
@@ -77,7 +90,9 @@ def run_epoch(
                 pair_idx = None
                 labels = batch["label"].to(model.device, non_blocking=True).view(-1)
 
-            with torch.cuda.amp.autocast(enabled=use_autocast):
+            # Use the recommended torch.amp.autocast API for CUDA.
+            autocast_device = "cuda" if use_autocast else "cpu"
+            with torch.amp.autocast(device_type=autocast_device, enabled=use_autocast):
                 logits = model.score_pairs(images, pair_indices=pair_idx).view(-1)
                 if logits.numel() == 0:
                     skipped_empty_pairs += 1
@@ -127,13 +142,17 @@ def prepare_dataloaders(
     args,
     device: torch.device,
     wandb_run,
+    log_step: Optional[int] = None,
 ):
     """Build train/val dataloaders based on the selected mode."""
+    train_transform = _train_augmentation_from_args(args)
     use_precomputed = bool(args.precomputed_root)
     if use_precomputed:
         train_loader, val_loader, meta = build_precomputed_dataloaders_from_args(
             args,
             device=device,
+            train_transform=train_transform,
+            val_transform=None,
         )
         train_dataset = None
         val_dataset = None
@@ -150,6 +169,7 @@ def prepare_dataloaders(
                     "data/train_shards": meta["train_shards"],
                     "data/val_shards": meta["val_shards"],
                 },
+                step=log_step,
             )
         else:
             print(
@@ -164,6 +184,7 @@ def prepare_dataloaders(
                     "data/train_shards": meta["train_shards"],
                     "data/val_shards": meta["val_shards"],
                 },
+                step=log_step,
             )
     else:
         if args.mode == "pairwise":
@@ -173,7 +194,12 @@ def prepare_dataloaders(
                 train_dataset,
                 val_dataset,
                 meta,
-            ) = build_pair_dataloaders_from_args(args, device=device)
+            ) = build_pair_dataloaders_from_args(
+                args,
+                device=device,
+                train_transform=train_transform,
+                val_transform=None,
+            )
             print(
                 f"[DATA] Loaded {meta['train_pairs']} train pairs "
                 f"({meta['train_scenes']} scenes). "
@@ -187,11 +213,14 @@ def prepare_dataloaders(
                     "data/train_scenes": meta["train_scenes"],
                     "data/val_scenes": meta["val_scenes"],
                 },
+                step=log_step,
             )
         else:
             train_loader, val_loader, meta = build_multiview_dataloaders_from_args(
                 args,
                 device=device,
+                train_transform=train_transform,
+                val_transform=None,
             )
             train_dataset = None
             val_dataset = None
@@ -206,6 +235,7 @@ def prepare_dataloaders(
                     "data/val_scenes": meta["val_scenes"],
                     "data/max_pairs_per_scene": meta["max_pairs_per_scene"],
                 },
+                step=log_step,
             )
 
     return train_loader, val_loader, train_dataset, val_dataset, meta
@@ -239,7 +269,7 @@ def warmup_head(model: VGGTHeadModel, args, train_loader, train_dataset):
             _ensure_head_and_gnn(emb_dim=emb_sample.shape[-1])
 
 
-def log_parameter_counts(model: VGGTHeadModel, wandb_run):
+def log_parameter_counts(model: VGGTHeadModel, wandb_run, step: Optional[int] = None):
     counts = count_parameters(model, model.head)
     print(f"[PARAM] Total parameters (VGGT + head): {counts['total']:,}")
     print(f"[PARAM] Head parameters only: {counts['head']:,}")
@@ -251,6 +281,7 @@ def log_parameter_counts(model: VGGTHeadModel, wandb_run):
             "params/head": counts["head"],
             "params/trainable": counts["trainable"],
         },
+        step=step,
     )
 
 
@@ -273,9 +304,39 @@ def save_head_checkpoint(
     print(f"[CKPT] Saved checkpoint to {path}")
 
 
+def load_head_checkpoint(model: VGGTHeadModel, ckpt_path: Path):
+    """Load head weights from a checkpoint payload or raw state_dict."""
+    payload = torch.load(ckpt_path, map_location=model.device)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Checkpoint at {ckpt_path} is not a dict; cannot load head weights.")
+
+    if "head_state" in payload:
+        state = payload["head_state"]
+    elif "state_dict" in payload:
+        state = payload["state_dict"]
+    else:
+        # Assume the payload itself is a compatible state dict.
+        state = payload
+
+    model.load_head_state(state)
+    print(f"[CKPT] Loaded head weights from {ckpt_path}")
+
+
+def save_best_head_weights(model: VGGTHeadModel, path: Path, wandb_run):
+    """Persist only the head-related weights for lightweight reuse."""
+    ensure_dir(path.parent)
+    torch.save(model.get_head_state(), path)
+    print(f"[CKPT] Saved best head weights to {path}")
+    wandb_save(wandb_run, str(path))
+
+
 def main():
     parser = build_vggt_trainer_parser()
     args = parser.parse_args()
+
+    if not args.save_ckpt_path:
+        args.save_ckpt_path = f"runs/precomputed/{args.mode}/head_ckpt/best_head.pth"
+    best_head_ckpt_path = Path(args.save_ckpt_path)
 
     set_seed(args.seed)
     output_dir = ensure_dir(args.output_dir)
@@ -296,6 +357,7 @@ def main():
             args=args,
             device=device,
             wandb_run=wandb_run,
+            log_step=0,
         )
 
         model = VGGTHeadModel(
@@ -312,14 +374,55 @@ def main():
         )
 
         warmup_head(model, args, train_loader, train_dataset)
-        log_parameter_counts(model, wandb_run)
+        log_parameter_counts(model, wandb_run, step=0)
+
+        criterion = nn.BCEWithLogitsLoss()
+
+        if args.eval_ckpt_model:
+            if not args.ckpt_path:
+                raise ValueError("Provide --ckpt_path when using --eval_ckpt_model.")
+            ckpt_path = Path(args.ckpt_path)
+            if not ckpt_path.is_file():
+                raise FileNotFoundError(f"Checkpoint not found at {ckpt_path}")
+
+            load_head_checkpoint(model, ckpt_path)
+            eval_loader = val_loader if val_loader is not None else train_loader
+            eval_split = "val" if val_loader is not None else "train"
+            if eval_loader is None:
+                raise RuntimeError("No dataloader available for evaluation.")
+
+            eval_metrics = run_epoch(
+                model=model,
+                loader=eval_loader,
+                criterion=criterion,
+                optimizer=None,
+                grad_clip=0.0,
+                log_every=0,
+                max_steps=-1,
+                multiview=(args.mode == "multiview"),
+            )
+            print(
+                f"[EVAL-{eval_split.upper()}] loss={eval_metrics['loss']:.4f} "
+                f"graph_IOU={eval_metrics['graph_IOU']:.4f} "
+                f"graph_AUC={eval_metrics['graph_AUC']:.4f}"
+            )
+            wandb_log(
+                wandb_run,
+                {
+                    f"{eval_split}/loss": eval_metrics["loss"],
+                    f"{eval_split}/graph_IOU": eval_metrics["graph_IOU"],
+                    f"{eval_split}/graph_AUC": eval_metrics["graph_AUC"],
+                },
+                step=0,
+            )
+            wandb_log(wandb_run, {"best/graph_AUC": eval_metrics["graph_AUC"]}, step=0)
+            return
 
         optimizer = torch.optim.AdamW(
             model.head_parameters(),
             lr=args.lr,
             weight_decay=args.weight_decay,
         )
-        criterion = nn.BCEWithLogitsLoss()
 
         best_graph_auc = -1.0
         for epoch in range(1, args.epochs + 1):
@@ -392,10 +495,12 @@ def main():
                         path=ckpt_path,
                     )
                     wandb_save(wandb_run, str(ckpt_path))
+                    save_best_head_weights(model, best_head_ckpt_path, wandb_run)
             else:
                 # Still keep track of the best training metric for logging.
                 if train_metrics["graph_AUC"] > best_graph_auc:
                     best_graph_auc = train_metrics["graph_AUC"]
+                    save_best_head_weights(model, best_head_ckpt_path, wandb_run)
 
             if args.save_every > 0 and epoch % args.save_every == 0:
                 ckpt_path = output_dir / f"head_epoch{epoch}.pt"
@@ -409,7 +514,7 @@ def main():
                 )
                 wandb_save(wandb_run, str(ckpt_path))
 
-        wandb_log(wandb_run, {"best/graph_AUC": best_graph_auc})
+        wandb_log(wandb_run, {"best/graph_AUC": best_graph_auc}, step=args.epochs)
         print(f"[DONE] Training finished. Best metric={best_graph_auc:.4f}")
     finally:
         wandb_finish(wandb_run)

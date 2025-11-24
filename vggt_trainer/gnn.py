@@ -56,9 +56,9 @@ class GraphTransformer(nn.Module):
     def __init__(
         self,
         emb_dim: int,
-        num_layers: int = 2,
+        num_layers: int = 1,
         num_heads: int = 4,
-        mlp_ratio: float = 2.0,
+        mlp_ratio: float = 1.0,
         dropout: float = 0.1,
     ):
         super().__init__()

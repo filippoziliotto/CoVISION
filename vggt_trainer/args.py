@@ -80,6 +80,36 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         help="Final (H, W) fed to VGGT when preprocess_mode='square'.",
     )
     parser.add_argument(
+        "--aug_pair_permutation_p",
+        type=float,
+        default=0.0,
+        help="Probability of swapping (i, j) order inside a pair (0 disables).",
+    )
+    parser.add_argument(
+        "--aug_pair_keep_ratio",
+        type=float,
+        default=1.0,
+        help="[multiview] Randomly keep this fraction of labeled pairs per scene (1 disables).",
+    )
+    parser.add_argument(
+        "--aug_hflip_p",
+        type=float,
+        default=0.0,
+        help="Per-image horizontal flip probability (0 disables).",
+    )
+    parser.add_argument(
+        "--aug_color_jitter",
+        type=float,
+        default=0.0,
+        help="Color jitter strength for brightness/contrast/saturation; set 0 to disable.",
+    )
+    parser.add_argument(
+        "--aug_noise_std",
+        type=float,
+        default=0.0,
+        help="Stddev for per-pixel Gaussian noise added after preprocessing (0 disables).",
+    )
+    parser.add_argument(
         "--eval_batch_size",
         type=int,
         default=None,
@@ -200,15 +230,21 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         help="Save an extra checkpoint every N epochs (0 disables periodic saves).",
     )
     parser.add_argument(
+        "--save_ckpt_path",
+        type=str,
+        default=None,
+        help="Path to store the best head weights (defaults to runs/precomputed/{mode}/head_ckpt/best_head.pth).",
+    )
+    parser.add_argument(
         "--log_every",
         type=int,
-        default=10,
+        default=100,
         help="Print training progress every N batches.",
     )
     parser.add_argument(
         "--wandb_project",
         type=str,
-        default="Co-Vision",
+        default="Co-Vision FT",
         help="Weights & Biases project name (set None to disable).",
     )
     parser.add_argument(
@@ -226,6 +262,17 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         "--skip_eval",
         action="store_true",
         help="Only train on the training set without running validation.",
+    )
+    parser.add_argument(
+        "--eval_ckpt_model",
+        action="store_true",
+        help="Run a single evaluation using a provided head checkpoint and exit.",
+    )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        default="",
+        help="Checkpoint path to load the head weights from when --eval_ckpt_model is set.",
     )
     # Useless but for wandb compatibility
     parser.add_argument(

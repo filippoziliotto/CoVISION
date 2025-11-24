@@ -11,7 +11,7 @@ import csv
 import os
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import argparse
 import json
 from collections import OrderedDict
@@ -341,6 +341,7 @@ class PairImageDataset(Dataset):
         square_size: int = 518,
         cache_images: bool = True,
         max_cache_items: int = 0,
+        transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
     ):
         if not pairs:
             raise RuntimeError("PairImageDataset cannot be instantiated with zero samples.")
@@ -351,6 +352,7 @@ class PairImageDataset(Dataset):
         self.max_cache_items = max_cache_items
         self._image_cache: "OrderedDict[str, torch.Tensor]" = OrderedDict() if cache_images else None
         self._depth_cache = {}
+        self.transform = transform
 
     def _load_single_image(self, path: str) -> torch.Tensor:
         """Load and preprocess a single image, caching the result."""
@@ -398,7 +400,7 @@ class PairImageDataset(Dataset):
                 depth_i = torch.from_numpy(depth_arr[record.depth_idx_i]).float()
                 depth_j = torch.from_numpy(depth_arr[record.depth_idx_j]).float()
                 depths = torch.stack([depth_i, depth_j], dim=0)
-        return {
+        sample = {
             "images": images,
             "label": torch.tensor(record.label, dtype=torch.float32),
             "strength": torch.tensor(record.strength, dtype=torch.float32),
@@ -406,6 +408,9 @@ class PairImageDataset(Dataset):
             "split_id": record.split_id,
             "depths": depths,
         }
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample
 
 
 def build_image_pair_dataloaders(
@@ -423,6 +428,8 @@ def build_image_pair_dataloaders(
     device: Optional[str] = None,
     prefetch_factor: Optional[int] = None,
     persistent_workers: Optional[bool] = None,
+    train_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+    val_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], PairImageDataset, Optional[PairImageDataset], Dict]:
     """Entry point used by the training script."""
     train_ratio = _default_train_ratio(dataset_type, train_ratio)
@@ -447,6 +454,7 @@ def build_image_pair_dataloaders(
         preprocess_mode=preprocess_mode,
         square_size=square_size,
         cache_images=cache_images,
+        transform=train_transform,
     )
     val_dataset = (
         PairImageDataset(
@@ -454,6 +462,7 @@ def build_image_pair_dataloaders(
             preprocess_mode=preprocess_mode,
             square_size=square_size,
             cache_images=cache_images,
+            transform=val_transform,
         )
         if val_pairs
         else None
@@ -556,6 +565,7 @@ class MultiViewSceneDataset(Dataset):
         preprocess_mode: str,
         square_size: int,
         seed: int,
+        transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
     ):
         if not split_meta:
             raise RuntimeError("MultiViewSceneDataset cannot be created with empty split metadata.")
@@ -564,6 +574,7 @@ class MultiViewSceneDataset(Dataset):
         self.preprocess_mode = preprocess_mode
         self.square_size = square_size
         self.rng = random.Random(seed)
+        self.transform = transform
 
     def __len__(self) -> int:
         return len(self.split_meta)
@@ -598,7 +609,7 @@ class MultiViewSceneDataset(Dataset):
             if depth_arr.ndim >= 3 and depth_arr.shape[0] == len(img_files):
                 depth_tensor = torch.from_numpy(depth_arr).float()
 
-        return {
+        sample = {
             "images": images,  # (N,3,H,W)
             "pairs": pair_idx,  # (P,2)
             "labels": labels,  # (P,)
@@ -607,6 +618,9 @@ class MultiViewSceneDataset(Dataset):
             "split_id": meta["split_id"],
             "depths": depth_tensor,  # (N,H,W) or None
         }
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample
 
 
 def build_multiview_dataloaders(
@@ -623,6 +637,8 @@ def build_multiview_dataloaders(
     device: Optional[str] = None,
     prefetch_factor: Optional[int] = None,
     persistent_workers: Optional[bool] = None,
+    train_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+    val_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
     """Build train/val dataloaders for multiview training (one scene per batch)."""
     train_ratio = _default_train_ratio(dataset_type, train_ratio)
@@ -642,6 +658,7 @@ def build_multiview_dataloaders(
         preprocess_mode=preprocess_mode,
         square_size=square_size,
         seed=seed,
+        transform=train_transform,
     )
     val_ds = (
         MultiViewSceneDataset(
@@ -650,6 +667,7 @@ def build_multiview_dataloaders(
             preprocess_mode=preprocess_mode,
             square_size=square_size,
             seed=seed + 1,
+            transform=val_transform,
         )
         if val_meta
         else None
@@ -712,7 +730,11 @@ def _list_precomputed_shards(root: Path, dataset_type: str, mode: str, subset: s
 class PrecomputedPairDataset(Dataset):
     """Indexable view over pairwise shards."""
 
-    def __init__(self, shard_paths: Sequence[Path]):
+    def __init__(
+        self,
+        shard_paths: Sequence[Path],
+        transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+    ):
         if not shard_paths:
             raise RuntimeError("No pairwise shards found.")
         self.shard_paths = list(shard_paths)
@@ -725,6 +747,7 @@ class PrecomputedPairDataset(Dataset):
             self.prefix.append(self.prefix[-1] + length)
         self.total = self.prefix[-1]
         self._store_cache = {}
+        self.transform = transform
 
     def __len__(self) -> int:
         return self.total
@@ -747,19 +770,26 @@ class PrecomputedPairDataset(Dataset):
         strength = torch.tensor(store["strengths"][local_idx], dtype=torch.float32)
         scene_version = str(store["scene_version"][local_idx])
         split_id = str(store["split_id"][local_idx])
-        return {
+        sample = {
             "images": images,
             "label": label,
             "strength": strength,
             "scene_version": scene_version,
             "split_id": split_id,
         }
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample
 
 
 class PrecomputedSceneDataset(Dataset):
     """Indexable view over multiview shards (one group per scene)."""
 
-    def __init__(self, shard_paths: Sequence[Path]):
+    def __init__(
+        self,
+        shard_paths: Sequence[Path],
+        transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+    ):
         if not shard_paths:
             raise RuntimeError("No multiview shards found.")
         self.shard_paths = list(shard_paths)
@@ -771,6 +801,7 @@ class PrecomputedSceneDataset(Dataset):
         if not self.scene_index:
             raise RuntimeError("No scenes discovered inside multiview shards.")
         self._store_cache = {}
+        self.transform = transform
 
     def __len__(self) -> int:
         return len(self.scene_index)
@@ -791,7 +822,7 @@ class PrecomputedSceneDataset(Dataset):
         pairs = torch.from_numpy(grp["pairs"][...]).long()
         labels = torch.from_numpy(grp["labels"][...]).float()
         strengths = torch.from_numpy(grp["strengths"][...]).float()
-        return {
+        sample = {
             "images": images,
             "pairs": pairs,
             "labels": labels,
@@ -799,6 +830,9 @@ class PrecomputedSceneDataset(Dataset):
             "scene_version": grp.attrs.get("scene_version", ""),
             "split_id": grp.attrs.get("split_id", ""),
         }
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample
 
 
 def _loader_kwargs(
@@ -834,13 +868,15 @@ def build_precomputed_pair_dataloaders(
     device: Optional[str],
     prefetch_factor: Optional[int],
     persistent_workers: Optional[bool],
+    train_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+    val_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
     root = Path(precomputed_root)
     train_shards = _list_precomputed_shards(root, dataset_type, "pairwise", "train")
     val_shards = _list_precomputed_shards(root, dataset_type, "pairwise", "val") if (root / dataset_type / "pairwise" / "val").exists() else []
 
-    train_ds = PrecomputedPairDataset(train_shards)
-    val_ds = PrecomputedPairDataset(val_shards) if val_shards else None
+    train_ds = PrecomputedPairDataset(train_shards, transform=train_transform)
+    val_ds = PrecomputedPairDataset(val_shards, transform=val_transform) if val_shards else None
 
     train_loader = DataLoader(
         train_ds,
@@ -884,14 +920,16 @@ def build_precomputed_multiview_dataloaders(
     device: Optional[str],
     prefetch_factor: Optional[int],
     persistent_workers: Optional[bool],
+    train_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+    val_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
     root = Path(precomputed_root)
     train_shards = _list_precomputed_shards(root, dataset_type, "multiview", "train")
     val_base = root / dataset_type / "multiview" / "val"
     val_shards = _list_precomputed_shards(root, dataset_type, "multiview", "val") if val_base.exists() else []
 
-    train_ds = PrecomputedSceneDataset(train_shards)
-    val_ds = PrecomputedSceneDataset(val_shards) if val_shards else None
+    train_ds = PrecomputedSceneDataset(train_shards, transform=train_transform)
+    val_ds = PrecomputedSceneDataset(val_shards, transform=val_transform) if val_shards else None
 
     train_loader = DataLoader(
         train_ds,
@@ -937,7 +975,12 @@ def _persistent_worker_flag(disable_flag: bool) -> Optional[bool]:
     return None if not disable_flag else False
 
 
-def build_pair_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
+def build_pair_dataloaders_from_args(
+    args,
+    device: Optional[str],
+    train_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+    val_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+) -> Tuple[
     DataLoader,
     Optional[DataLoader],
     PairImageDataset,
@@ -963,10 +1006,17 @@ def build_pair_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
         square_size=args.square_size,
         max_pairs_per_split=args.max_pairs_per_split,
         device=str(device) if device is not None else None,
+        train_transform=train_transform,
+        val_transform=val_transform,
     )
 
 
-def build_multiview_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
+def build_multiview_dataloaders_from_args(
+    args,
+    device: Optional[str],
+    train_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+    val_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+) -> Tuple[
     DataLoader,
     Optional[DataLoader],
     Dict,
@@ -986,10 +1036,17 @@ def build_multiview_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
         max_pairs_per_scene=args.max_pairs_per_scene,
         split_index_path=args.split_index_path or None,
         device=str(device) if device is not None else None,
+        train_transform=train_transform,
+        val_transform=val_transform,
     )
 
 
-def build_precomputed_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
+def build_precomputed_dataloaders_from_args(
+    args,
+    device: Optional[str],
+    train_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+    val_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
+) -> Tuple[
     DataLoader,
     Optional[DataLoader],
     Dict,
@@ -1009,6 +1066,8 @@ def build_precomputed_dataloaders_from_args(args, device: Optional[str]) -> Tupl
             device=str(device) if device is not None else None,
             prefetch_factor=args.prefetch_factor,
             persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+            train_transform=train_transform,
+            val_transform=val_transform,
         )
     else:
         train_loader, val_loader, meta = build_precomputed_multiview_dataloaders(
@@ -1018,6 +1077,8 @@ def build_precomputed_dataloaders_from_args(args, device: Optional[str]) -> Tupl
             device=str(device) if device is not None else None,
             prefetch_factor=args.prefetch_factor,
             persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+            train_transform=train_transform,
+            val_transform=val_transform,
         )
     return train_loader, val_loader, meta
 

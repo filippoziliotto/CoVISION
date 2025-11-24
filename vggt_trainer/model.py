@@ -156,7 +156,11 @@ class VGGTHeadModel(nn.Module):
         super().__init__()
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = torch.device(device)
+        requested_device = torch.device(device)
+        if requested_device.type == "cuda" and not torch.cuda.is_available():
+            print("[MODEL] Requested CUDA but no GPU is available; falling back to CPU for loading.")
+            requested_device = torch.device("cpu")
+        self.device = requested_device
         self.backbone_dtype = backbone_dtype
         self.layer_mode = layer_mode
         self.head_hidden_dim = head_hidden_dim
@@ -169,9 +173,9 @@ class VGGTHeadModel(nn.Module):
         dtype = _resolve_torch_dtype(backbone_dtype)
         dtype_desc = "fp32" if dtype is None else str(dtype)
         print(f"[MODEL] Loading VGGT backbone '{backbone_ckpt}' on {self.device} (dtype={dtype_desc})...")
-        load_kwargs = {"map_location": self.device}
-        if dtype is not None:
-            load_kwargs["torch_dtype"] = dtype
+        # Do not pass map_location to safetensors; load with defaults then move.
+        load_kwargs = {}
+        # VGGT.__init__ does not accept torch_dtype; cast after loading instead.
         self.backbone = VGGT.from_pretrained(backbone_ckpt, **load_kwargs).to(self.device)
         if dtype is not None:
             self.backbone = self.backbone.to(dtype=dtype)
@@ -190,8 +194,10 @@ class VGGTHeadModel(nn.Module):
         if self.gnn is None:
             self.gnn = GraphTransformer(
                 emb_dim=emb_dim,
-                num_layers=2,
+                # Use a shallower/lower-FFN GNN by default to keep parameter count small.
+                num_layers=1,
                 num_heads=4,
+                mlp_ratio=1.0,
             ).to(self.device)
         elif getattr(self.gnn, "emb_dim", emb_dim) != emb_dim:
             raise ValueError(
