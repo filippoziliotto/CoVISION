@@ -215,6 +215,11 @@ def warmup_head(model: VGGTHeadModel, args, train_loader, train_dataset):
     """
     Run a tiny forward pass to instantiate the head before constructing the optimizer.
     """
+    def _ensure_head_and_gnn(emb_dim: int):
+        model._init_head_if_needed(emb_dim=emb_dim)
+        if getattr(model, "use_gnn_head", False):
+            model._ensure_gnn(emb_dim=emb_dim)
+
     if args.mode == "pairwise":
         if train_dataset is not None and len(train_dataset) > 0:
             sample = train_dataset[0]
@@ -231,7 +236,7 @@ def warmup_head(model: VGGTHeadModel, args, train_loader, train_dataset):
         sample_scene = next(iter(train_loader))
         with torch.no_grad():
             emb_sample = model.encode_views(sample_scene["images"].to(model.device))
-            model._init_head_if_needed(emb_dim=emb_sample.shape[-1])
+            _ensure_head_and_gnn(emb_dim=emb_sample.shape[-1])
 
 
 def log_parameter_counts(model: VGGTHeadModel, wandb_run):
@@ -303,6 +308,7 @@ def main():
             token_proj_dim=args.token_proj_dim,
             summary_tokens=args.summary_tokens,
             summary_heads=args.summary_heads,
+            use_gnn_head=getattr(args, "use_gnn_head", False),
         )
 
         warmup_head(model, args, train_loader, train_dataset)

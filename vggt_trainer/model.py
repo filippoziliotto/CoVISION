@@ -20,6 +20,7 @@ if str(REPO_ROOT / "vggt") not in sys.path:
     sys.path.append(str(REPO_ROOT / "vggt"))
 
 from vggt.vggt.models.vggt import VGGT
+from vggt_trainer.gnn import GraphTransformer
 
 
 class TokenSummarizer(nn.Module):
@@ -150,6 +151,7 @@ class VGGTHeadModel(nn.Module):
         token_proj_dim: int = 256,
         summary_tokens: int = 8,
         summary_heads: int = 4,
+        use_gnn_head: bool = False,
     ):
         super().__init__()
         if device is None:
@@ -162,6 +164,7 @@ class VGGTHeadModel(nn.Module):
         self.token_proj_dim = token_proj_dim
         self.summary_tokens = summary_tokens
         self.summary_heads = summary_heads
+        self.use_gnn_head = use_gnn_head
 
         dtype = _resolve_torch_dtype(backbone_dtype)
         dtype_desc = "fp32" if dtype is None else str(dtype)
@@ -181,6 +184,20 @@ class VGGTHeadModel(nn.Module):
         self.token_projector: Optional[nn.Linear] = None
         self.token_proj_norm: Optional[nn.LayerNorm] = None
         self.token_summarizer: Optional[TokenSummarizer] = None
+        self.gnn: Optional[GraphTransformer] = None
+
+    def _ensure_gnn(self, emb_dim: int):
+        if self.gnn is None:
+            self.gnn = GraphTransformer(
+                emb_dim=emb_dim,
+                num_layers=2,
+                num_heads=4,
+            ).to(self.device)
+        elif getattr(self.gnn, "emb_dim", emb_dim) != emb_dim:
+            raise ValueError(
+                f"Existing GNN expects emb_dim={self.gnn.emb_dim}, "
+                f"but received emb_dim={emb_dim}."
+            )
 
     def _ensure_batch_dim(self, images: torch.Tensor) -> torch.Tensor:
         """Guarantee a batch dimension for downstream encoding."""
@@ -462,6 +479,16 @@ class VGGTHeadModel(nn.Module):
         view_embeddings = self._extract_view_embeddings(
             images, select_layers=True, keep_batch=True
         )
+        # If using GNN head, process view_embeddings through GraphTransformer.
+        if self.use_gnn_head:
+            # view_embeddings: (B, S, L, D) or (B, S, D)
+            if view_embeddings.dim() == 4:
+                # (B, S, L, D) -> (B, S, D) by averaging over L
+                view_embeddings = view_embeddings.mean(2)
+            # Now (B, S, D)
+            self._ensure_gnn(view_embeddings.shape[-1])
+            view_embeddings = self.gnn(view_embeddings)
+
         emb_i, emb_j = self._gather_pair_embeddings(view_embeddings, pair_indices)
         if emb_i.numel() == 0:
             return torch.empty(0, device=self.device)
@@ -525,6 +552,8 @@ class VGGTHeadModel(nn.Module):
             params += list(self.token_summarizer.parameters())
         if self.head is not None:
             params += list(self.head.parameters())
+        if self.gnn is not None:
+            params += list(self.gnn.parameters())
         return params
 
     def get_head_state(self) -> dict:
@@ -537,6 +566,8 @@ class VGGTHeadModel(nn.Module):
             state["token_proj_norm"] = self.token_proj_norm.state_dict()
         if self.token_summarizer is not None:
             state["token_summarizer"] = self.token_summarizer.state_dict()
+        if self.gnn is not None:
+            state["gnn"] = self.gnn.state_dict()
         return state
 
     def load_head_state(self, state_dict: dict):
@@ -552,6 +583,10 @@ class VGGTHeadModel(nn.Module):
             self.token_proj_norm.load_state_dict(state_dict["token_proj_norm"])
         if "token_summarizer" in state_dict and self.token_summarizer is not None:
             self.token_summarizer.load_state_dict(state_dict["token_summarizer"])
+        if "gnn" in state_dict:
+            if self.gnn is None:
+                raise RuntimeError("GNN must be initialised before loading weights.")
+            self.gnn.load_state_dict(state_dict["gnn"])
 
 def _parse_pair_indices_cli(raw_pairs: Optional[Sequence[str]], num_views: int) -> Optional[torch.Tensor]:
     """Parse CLI-friendly pair specs like ['0-1', '0,2'] into a tensor."""

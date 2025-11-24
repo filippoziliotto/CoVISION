@@ -88,7 +88,12 @@ def compute_graph_metrics(probs: np.ndarray, labels: np.ndarray) -> Dict[str, fl
 def count_parameters(model: torch.nn.Module, head: Optional[torch.nn.Module]) -> Dict[str, int]:
     """Return a small dictionary with parameter counts."""
     total = sum(p.numel() for p in model.parameters())
-    head_params = sum(p.numel() for p in head.parameters()) if head is not None else 0
+    if hasattr(model, "head_parameters"):
+        head_params = sum(p.numel() for p in model.head_parameters())
+    elif head is not None:
+        head_params = sum(p.numel() for p in head.parameters())
+    else:
+        head_params = 0
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return {"total": total, "head": head_params, "trainable": trainable}
 

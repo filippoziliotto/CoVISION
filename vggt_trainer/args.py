@@ -166,6 +166,11 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         default=4,
         help="Number of attention heads for the token summarizer.",
     )
+    parser.add_argument(
+        "--use_gnn_head",
+        action="store_true",
+        help="If set, applies a GraphTransformer to view embeddings before the head.",
+    )
 
     # Optimisation arguments
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs.")
