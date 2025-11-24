@@ -17,11 +17,13 @@ import json
 from collections import OrderedDict
 from pathlib import Path
 import sys
+import bisect
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+import zarr
 
 # Ensure repository root (and bundled vggt submodule) is importable.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -508,18 +510,6 @@ def build_image_pair_dataloaders(
     return train_loader, val_loader, train_dataset, val_dataset, meta
 
 
-__all__ = [
-    "PairImageDataset",
-    "MultiViewSceneDataset",
-    "PairRecord",
-    "build_image_pair_dataloaders",
-    "build_multiview_dataloaders",
-    "build_pair_dataloaders_from_args",
-    "build_multiview_dataloaders_from_args",
-    "collate_scene",
-    "load_pair_tensor",
-]
-
 # -------------------------------------------------------------------------
 # Multi-view scene dataset (images + pair labels)
 # -------------------------------------------------------------------------
@@ -710,6 +700,236 @@ def build_multiview_dataloaders(
 
 
 # -------------------------------------------------------------------------
+# Precomputed Zarr datasets (pairwise + multiview)
+# -------------------------------------------------------------------------
+def _list_precomputed_shards(root: Path, dataset_type: str, mode: str, subset: str) -> List[Path]:
+    base = root / dataset_type / mode / subset
+    if not base.is_dir():
+        raise RuntimeError(f"No precomputed shards found under {base}")
+    return sorted([p for p in base.iterdir() if p.suffix == ".zarr"])
+
+
+class PrecomputedPairDataset(Dataset):
+    """Indexable view over pairwise shards."""
+
+    def __init__(self, shard_paths: Sequence[Path]):
+        if not shard_paths:
+            raise RuntimeError("No pairwise shards found.")
+        self.shard_paths = list(shard_paths)
+        self.shard_lengths: List[int] = []
+        self.prefix: List[int] = [0]
+        for p in self.shard_paths:
+            root = zarr.open(str(p), mode="r")
+            length = int(len(root["labels"]))
+            self.shard_lengths.append(length)
+            self.prefix.append(self.prefix[-1] + length)
+        self.total = self.prefix[-1]
+        self._store_cache = {}
+
+    def __len__(self) -> int:
+        return self.total
+
+    def _get_store(self, path: Path):
+        store = self._store_cache.get(path)
+        if store is None:
+            store = zarr.open(str(path), mode="r")
+            self._store_cache[path] = store
+        return store
+
+    def __getitem__(self, index: int) -> dict:
+        if index < 0 or index >= self.total:
+            raise IndexError(index)
+        shard_idx = bisect.bisect_right(self.prefix, index) - 1
+        local_idx = index - self.prefix[shard_idx]
+        store = self._get_store(self.shard_paths[shard_idx])
+        images = torch.from_numpy(store["images"][local_idx])
+        label = torch.tensor(store["labels"][local_idx], dtype=torch.float32)
+        strength = torch.tensor(store["strengths"][local_idx], dtype=torch.float32)
+        scene_version = str(store["scene_version"][local_idx])
+        split_id = str(store["split_id"][local_idx])
+        return {
+            "images": images,
+            "label": label,
+            "strength": strength,
+            "scene_version": scene_version,
+            "split_id": split_id,
+        }
+
+
+class PrecomputedSceneDataset(Dataset):
+    """Indexable view over multiview shards (one group per scene)."""
+
+    def __init__(self, shard_paths: Sequence[Path]):
+        if not shard_paths:
+            raise RuntimeError("No multiview shards found.")
+        self.shard_paths = list(shard_paths)
+        self.scene_index: List[Tuple[Path, str]] = []
+        for p in self.shard_paths:
+            root = zarr.open(str(p), mode="r")
+            for key in root.group_keys():
+                self.scene_index.append((p, key))
+        if not self.scene_index:
+            raise RuntimeError("No scenes discovered inside multiview shards.")
+        self._store_cache = {}
+
+    def __len__(self) -> int:
+        return len(self.scene_index)
+
+    def _get_group(self, path: Path, key: str):
+        store = self._store_cache.get(path)
+        if store is None:
+            store = zarr.open(str(path), mode="r")
+            self._store_cache[path] = store
+        return store[key]
+
+    def __getitem__(self, index: int) -> dict:
+        if index < 0 or index >= len(self.scene_index):
+            raise IndexError(index)
+        path, key = self.scene_index[index]
+        grp = self._get_group(path, key)
+        images = torch.from_numpy(grp["images"][...])
+        pairs = torch.from_numpy(grp["pairs"][...]).long()
+        labels = torch.from_numpy(grp["labels"][...]).float()
+        strengths = torch.from_numpy(grp["strengths"][...]).float()
+        return {
+            "images": images,
+            "pairs": pairs,
+            "labels": labels,
+            "strengths": strengths,
+            "scene_version": grp.attrs.get("scene_version", ""),
+            "split_id": grp.attrs.get("split_id", ""),
+        }
+
+
+def _loader_kwargs(
+    batch_size: int,
+    shuffle: bool,
+    num_workers: int,
+    device: Optional[str],
+    prefetch_factor: Optional[int],
+    persistent_workers: Optional[bool],
+    collate_fn=None,
+):
+    use_cuda_pinning = device is not None and str(device).startswith("cuda") and torch.cuda.is_available()
+    kwargs = dict(
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=use_cuda_pinning,
+        persistent_workers=persistent_workers if persistent_workers is not None else num_workers > 0,
+    )
+    if collate_fn is not None:
+        kwargs["collate_fn"] = collate_fn
+    if prefetch_factor and num_workers > 0:
+        kwargs["prefetch_factor"] = prefetch_factor
+    return kwargs
+
+
+def build_precomputed_pair_dataloaders(
+    precomputed_root: str,
+    dataset_type: str,
+    batch_size: int,
+    val_batch_size: Optional[int],
+    num_workers: int,
+    device: Optional[str],
+    prefetch_factor: Optional[int],
+    persistent_workers: Optional[bool],
+) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
+    root = Path(precomputed_root)
+    train_shards = _list_precomputed_shards(root, dataset_type, "pairwise", "train")
+    val_shards = _list_precomputed_shards(root, dataset_type, "pairwise", "val") if (root / dataset_type / "pairwise" / "val").exists() else []
+
+    train_ds = PrecomputedPairDataset(train_shards)
+    val_ds = PrecomputedPairDataset(val_shards) if val_shards else None
+
+    train_loader = DataLoader(
+        train_ds,
+        **_loader_kwargs(
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            device=device,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+        ),
+    )
+    val_loader = None
+    if val_ds is not None:
+        val_loader = DataLoader(
+            val_ds,
+            **_loader_kwargs(
+                batch_size=val_batch_size if val_batch_size is not None else batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                device=device,
+                prefetch_factor=prefetch_factor,
+                persistent_workers=persistent_workers,
+            ),
+        )
+
+    meta = {
+        "train_pairs": len(train_ds),
+        "val_pairs": len(val_ds) if val_ds is not None else 0,
+        "train_shards": len(train_shards),
+        "val_shards": len(val_shards),
+        "source": str(root),
+    }
+    return train_loader, val_loader, meta
+
+
+def build_precomputed_multiview_dataloaders(
+    precomputed_root: str,
+    dataset_type: str,
+    num_workers: int,
+    device: Optional[str],
+    prefetch_factor: Optional[int],
+    persistent_workers: Optional[bool],
+) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
+    root = Path(precomputed_root)
+    train_shards = _list_precomputed_shards(root, dataset_type, "multiview", "train")
+    val_base = root / dataset_type / "multiview" / "val"
+    val_shards = _list_precomputed_shards(root, dataset_type, "multiview", "val") if val_base.exists() else []
+
+    train_ds = PrecomputedSceneDataset(train_shards)
+    val_ds = PrecomputedSceneDataset(val_shards) if val_shards else None
+
+    train_loader = DataLoader(
+        train_ds,
+        **_loader_kwargs(
+            batch_size=1,
+            shuffle=True,
+            num_workers=num_workers,
+            device=device,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
+            collate_fn=collate_scene,
+        ),
+    )
+    val_loader = None
+    if val_ds is not None:
+        val_loader = DataLoader(
+            val_ds,
+            **_loader_kwargs(
+                batch_size=1,
+                shuffle=False,
+                num_workers=num_workers,
+                device=device,
+                prefetch_factor=prefetch_factor,
+                persistent_workers=persistent_workers,
+                collate_fn=collate_scene,
+            ),
+        )
+
+    meta = {
+        "train_scenes": len(train_ds),
+        "val_scenes": len(val_ds) if val_ds is not None else 0,
+        "train_shards": len(train_shards),
+        "val_shards": len(val_shards),
+        "source": str(root),
+    }
+    return train_loader, val_loader, meta
+
+# -------------------------------------------------------------------------
 # Argument-friendly builders
 # -------------------------------------------------------------------------
 def _persistent_worker_flag(disable_flag: bool) -> Optional[bool]:
@@ -767,6 +987,57 @@ def build_multiview_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
         split_index_path=args.split_index_path or None,
         device=str(device) if device is not None else None,
     )
+
+
+def build_precomputed_dataloaders_from_args(args, device: Optional[str]) -> Tuple[
+    DataLoader,
+    Optional[DataLoader],
+    Dict,
+]:
+    """Argument-aware wrapper for precomputed dataloaders."""
+    root = args.precomputed_root
+    if not root:
+        raise RuntimeError("precomputed_root is empty; cannot build precomputed dataloaders.")
+
+    if args.mode == "pairwise":
+        train_loader, val_loader, meta = build_precomputed_pair_dataloaders(
+            precomputed_root=root,
+            dataset_type=args.dataset_type,
+            batch_size=args.batch_size,
+            val_batch_size=args.eval_batch_size,
+            num_workers=args.num_workers,
+            device=str(device) if device is not None else None,
+            prefetch_factor=args.prefetch_factor,
+            persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+        )
+    else:
+        train_loader, val_loader, meta = build_precomputed_multiview_dataloaders(
+            precomputed_root=root,
+            dataset_type=args.dataset_type,
+            num_workers=args.num_workers,
+            device=str(device) if device is not None else None,
+            prefetch_factor=args.prefetch_factor,
+            persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+        )
+    return train_loader, val_loader, meta
+
+
+__all__ = [
+    "PairImageDataset",
+    "MultiViewSceneDataset",
+    "PairRecord",
+    "build_image_pair_dataloaders",
+    "build_multiview_dataloaders",
+    "build_pair_dataloaders_from_args",
+    "build_multiview_dataloaders_from_args",
+    "build_precomputed_pair_dataloaders",
+    "build_precomputed_multiview_dataloaders",
+    "build_precomputed_dataloaders_from_args",
+    "PrecomputedPairDataset",
+    "PrecomputedSceneDataset",
+    "collate_scene",
+    "load_pair_tensor",
+]
 
 
 def _cli_args() -> argparse.Namespace:

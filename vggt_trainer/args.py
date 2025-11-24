@@ -49,6 +49,12 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         help="Optional JSON split index to reuse deterministic train/val splits (defaults to dataset/splits/*).",
     )
     parser.add_argument(
+        "--precomputed_root",
+        type=str,
+        default="runs/precomputed",
+        help="Root directory containing precomputed Zarr shards (set empty to read raw PNGs).",
+    )
+    parser.add_argument(
         "--max_pairs_per_split",
         type=int,
         default=-1,

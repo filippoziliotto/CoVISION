@@ -18,6 +18,7 @@ import random
 import sys
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -114,26 +115,29 @@ def _write_scene_shard(
             dtype=scene["images"].dtype,
             chunks=(1,) + scene["images"].shape[1:],
         )
+        pair_chunk = max(1, min(1024, scene["pairs"].shape[0]))
         grp.create_dataset(
             "pairs",
             data=scene["pairs"],
             compressor=compressor,
             dtype=scene["pairs"].dtype,
-            chunks=(min(1024, len(scene["pairs"])), 2),
+            chunks=(pair_chunk, 2),
         )
+        label_chunk = max(1, min(1024, len(scene["labels"])))
         grp.create_dataset(
             "labels",
             data=scene["labels"],
             compressor=compressor,
             dtype=scene["labels"].dtype,
-            chunks=(min(1024, len(scene["labels"])),),
+            chunks=(label_chunk,),
         )
+        strength_chunk = max(1, min(1024, len(scene["strengths"])))
         grp.create_dataset(
             "strengths",
             data=scene["strengths"],
             compressor=compressor,
             dtype=scene["strengths"].dtype,
-            chunks=(min(1024, len(scene["strengths"])),),
+            chunks=(strength_chunk,),
         )
         grp.attrs["scene_version"] = scene["scene_version"]
         grp.attrs["split_id"] = scene["split_id"]
@@ -146,12 +150,31 @@ def _load_pair_tensor(
     preprocess_mode: str,
     square_size: int,
     dtype: torch.dtype,
+    image_cache: Optional["OrderedDict[str, torch.Tensor]"] = None,
+    max_cache_items: int = 0,
 ) -> np.ndarray:
-    images, _ = (
-        load_and_preprocess_images_square([record.img_i, record.img_j], target_size=square_size)
-        if preprocess_mode == "square"
-        else load_and_preprocess_images([record.img_i, record.img_j], mode=preprocess_mode)
-    )
+    def _load_single(path: str) -> torch.Tensor:
+        if image_cache is not None and path in image_cache:
+            tensor = image_cache.pop(path)
+            image_cache[path] = tensor
+            return tensor
+
+        if preprocess_mode == "square":
+            img, _ = load_and_preprocess_images_square([path], target_size=square_size)
+            tensor = img[0]
+        else:
+            img = load_and_preprocess_images([path], mode=preprocess_mode)
+            tensor = img[0]
+
+        if image_cache is not None:
+            image_cache[path] = tensor
+            if max_cache_items > 0 and len(image_cache) > max_cache_items:
+                image_cache.popitem(last=False)
+        return tensor
+
+    img_i = _load_single(record.img_i)
+    img_j = _load_single(record.img_j)
+    images = torch.stack([img_i, img_j], dim=0)
     return images.to(dtype=dtype).cpu().numpy()
 
 
@@ -179,8 +202,16 @@ def _process_pairwise(
     shard: List[Tuple[np.ndarray, float, float, str, str]] = []
     shard_idx = 0
     dtype = _select_dtype(args.dtype)
+    image_cache = OrderedDict() if args.image_cache_size > 0 else None
     for rec in all_pairs:
-        tensor = _load_pair_tensor(rec, args.preprocess_mode, args.square_size, dtype)
+        tensor = _load_pair_tensor(
+            rec,
+            args.preprocess_mode,
+            args.square_size,
+            dtype,
+            image_cache=image_cache,
+            max_cache_items=args.image_cache_size,
+        )
         shard.append((tensor, rec.label, rec.strength, rec.scene_version, rec.split_id))
         if len(shard) >= args.shard_size_pairs:
             _write_pair_shard(shard, out_dir, shard_idx, compressor)
@@ -211,6 +242,9 @@ def _process_multiview(
         pairs, img_files, _ = _load_scene_pairs(meta["saved_obs"])
         if not img_files:
             print(f"[WARN] No images under {meta['saved_obs']}, skipping.")
+            continue
+        if not pairs:
+            print(f"[WARN] No labeled pairs under {meta['saved_obs']}, skipping.")
             continue
         if args.max_pairs_per_scene > 0 and len(pairs) > args.max_pairs_per_scene:
             pairs = rng.sample(pairs, k=args.max_pairs_per_scene)
@@ -280,6 +314,7 @@ def parse_args():
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "bf16", "fp32"])
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--compress_level", type=int, default=5, help="Zstd level for Blosc.")
+    parser.add_argument("--image_cache_size",type=int,default=1024, help="LRU cache size for preprocessed images during pairwise mode (set 0 to disable).")
     return parser.parse_args()
 
 

@@ -15,12 +15,13 @@ from tqdm import tqdm
 # Ensure repository root is importable for shared utilities.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
-    sys.path.append(str(REPO_ROOT))
+    sys.path.insert(0, str(REPO_ROOT))
 
 from vggt_trainer.args import build_vggt_trainer_parser
 from vggt_trainer.data import (
     build_multiview_dataloaders_from_args,
     build_pair_dataloaders_from_args,
+    build_precomputed_dataloaders_from_args,
 )
 from vggt_trainer.model import VGGTHeadModel
 from vggt_trainer.utils import (
@@ -128,47 +129,84 @@ def prepare_dataloaders(
     wandb_run,
 ):
     """Build train/val dataloaders based on the selected mode."""
-    if args.mode == "pairwise":
-        (
-            train_loader,
-            val_loader,
-            train_dataset,
-            val_dataset,
-            meta,
-        ) = build_pair_dataloaders_from_args(args, device=device)
-        print(
-            f"[DATA] Loaded {meta['train_pairs']} train pairs "
-            f"({meta['train_scenes']} scenes). "
-            f"Val pairs={meta['val_pairs']} ({meta['val_scenes']} scenes)"
-        )
-        wandb_log(
-            wandb_run,
-            {
-                "data/train_pairs": meta["train_pairs"],
-                "data/val_pairs": meta["val_pairs"],
-                "data/train_scenes": meta["train_scenes"],
-                "data/val_scenes": meta["val_scenes"],
-            },
-        )
-    else:
-        train_loader, val_loader, meta = build_multiview_dataloaders_from_args(
+    use_precomputed = bool(args.precomputed_root)
+    if use_precomputed:
+        train_loader, val_loader, meta = build_precomputed_dataloaders_from_args(
             args,
             device=device,
         )
         train_dataset = None
         val_dataset = None
-        print(
-            f"[DATA] Multiview scenes: train={meta['train_scenes']}, "
-            f"val={meta['val_scenes']}, max_pairs_per_scene={meta['max_pairs_per_scene']}"
-        )
-        wandb_log(
-            wandb_run,
-            {
-                "data/train_scenes": meta["train_scenes"],
-                "data/val_scenes": meta["val_scenes"],
-                "data/max_pairs_per_scene": meta["max_pairs_per_scene"],
-            },
-        )
+        if args.mode == "pairwise":
+            print(
+                f"[DATA] Precomputed pairwise | train_pairs={meta['train_pairs']} "
+                f"val_pairs={meta['val_pairs']} shards={meta['train_shards']}/{meta['val_shards']}"
+            )
+            wandb_log(
+                wandb_run,
+                {
+                    "data/train_pairs": meta["train_pairs"],
+                    "data/val_pairs": meta["val_pairs"],
+                    "data/train_shards": meta["train_shards"],
+                    "data/val_shards": meta["val_shards"],
+                },
+            )
+        else:
+            print(
+                f"[DATA] Precomputed multiview | train_scenes={meta['train_scenes']} "
+                f"val_scenes={meta['val_scenes']} shards={meta['train_shards']}/{meta['val_shards']}"
+            )
+            wandb_log(
+                wandb_run,
+                {
+                    "data/train_scenes": meta["train_scenes"],
+                    "data/val_scenes": meta["val_scenes"],
+                    "data/train_shards": meta["train_shards"],
+                    "data/val_shards": meta["val_shards"],
+                },
+            )
+    else:
+        if args.mode == "pairwise":
+            (
+                train_loader,
+                val_loader,
+                train_dataset,
+                val_dataset,
+                meta,
+            ) = build_pair_dataloaders_from_args(args, device=device)
+            print(
+                f"[DATA] Loaded {meta['train_pairs']} train pairs "
+                f"({meta['train_scenes']} scenes). "
+                f"Val pairs={meta['val_pairs']} ({meta['val_scenes']} scenes)"
+            )
+            wandb_log(
+                wandb_run,
+                {
+                    "data/train_pairs": meta["train_pairs"],
+                    "data/val_pairs": meta["val_pairs"],
+                    "data/train_scenes": meta["train_scenes"],
+                    "data/val_scenes": meta["val_scenes"],
+                },
+            )
+        else:
+            train_loader, val_loader, meta = build_multiview_dataloaders_from_args(
+                args,
+                device=device,
+            )
+            train_dataset = None
+            val_dataset = None
+            print(
+                f"[DATA] Multiview scenes: train={meta['train_scenes']}, "
+                f"val={meta['val_scenes']}, max_pairs_per_scene={meta['max_pairs_per_scene']}"
+            )
+            wandb_log(
+                wandb_run,
+                {
+                    "data/train_scenes": meta["train_scenes"],
+                    "data/val_scenes": meta["val_scenes"],
+                    "data/max_pairs_per_scene": meta["max_pairs_per_scene"],
+                },
+            )
 
     return train_loader, val_loader, train_dataset, val_dataset, meta
 
@@ -177,10 +215,18 @@ def warmup_head(model: VGGTHeadModel, args, train_loader, train_dataset):
     """
     Run a tiny forward pass to instantiate the head before constructing the optimizer.
     """
-    if args.mode == "pairwise" and train_dataset is not None:
-        sample = train_dataset[0]
-        with torch.no_grad():
-            _ = model(sample["images"].unsqueeze(0).to(model.device))
+    if args.mode == "pairwise":
+        if train_dataset is not None and len(train_dataset) > 0:
+            sample = train_dataset[0]
+            with torch.no_grad():
+                _ = model(sample["images"].unsqueeze(0).to(model.device))
+        elif train_loader is not None:
+            try:
+                batch = next(iter(train_loader))
+                with torch.no_grad():
+                    _ = model(batch["images"].to(model.device))
+            except StopIteration:
+                pass
     elif args.mode == "multiview" and train_loader is not None:
         sample_scene = next(iter(train_loader))
         with torch.no_grad():
