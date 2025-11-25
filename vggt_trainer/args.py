@@ -197,6 +197,13 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         help="Number of attention heads for the token summarizer.",
     )
     parser.add_argument(
+        "--mixing_aware",
+        type=str,
+        default=None,
+        choices=["pair", "scene", "both"],
+        help="Layer mixing strategy for the scene-aware head (requires --head_type scene_aware).",
+    )
+    parser.add_argument(
         "--head_type",
         type=str,
         default="base",

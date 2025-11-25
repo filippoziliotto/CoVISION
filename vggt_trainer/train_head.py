@@ -368,6 +368,11 @@ def main():
     parser = build_vggt_trainer_parser()
     args = parser.parse_args()
 
+    if args.mixing_aware is not None and args.head_type != "scene_aware":
+        raise ValueError("--mixing_aware is only valid when --head_type is 'scene_aware'.")
+    if args.head_type == "scene_aware" and args.mixing_aware is None:
+        raise ValueError("Specify --mixing_aware when using --head_type scene_aware.")
+
     if not args.save_ckpt_path:
         args.save_ckpt_path = f"runs/precomputed/{args.mode}/head_ckpt/best_head.pth"
     best_head_ckpt_path = Path(args.save_ckpt_path)
@@ -405,6 +410,7 @@ def main():
             summary_tokens=args.summary_tokens,
             summary_heads=args.summary_heads,
             head_type=args.head_type,
+            mixing_aware=args.mixing_aware,
         )
 
         warmup_head(model, args, train_loader, train_dataset)

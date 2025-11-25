@@ -316,6 +316,11 @@ def main():
     parser = build_vggt_trainer_parser()
     args = parser.parse_args()
 
+    if args.mixing_aware is not None and args.head_type != "scene_aware":
+        raise ValueError("--mixing_aware is only valid when --head_type is 'scene_aware'.")
+    if args.head_type == "scene_aware" and args.mixing_aware is None:
+        raise ValueError("Specify --mixing_aware when using --head_type scene_aware.")
+
     set_seed(args.seed)
     configure_torch_multiprocessing(args.num_workers)
     device = resolve_device(args.device)
@@ -348,6 +353,7 @@ def main():
         summary_tokens=args.summary_tokens,
         summary_heads=args.summary_heads,
         head_type=args.head_type,
+        mixing_aware=args.mixing_aware,
     )
 
     print("[EVAL] Running zero-shot on training split...")

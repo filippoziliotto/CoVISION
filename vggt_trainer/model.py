@@ -139,12 +139,18 @@ class PairwiseHead(nn.Module):
 # ------------------------- Scene-Aware Pairwise Head -------------------------
 class SceneAwarePairwiseHead(nn.Module):
     """
-    Pairwise head that performs scene-conditioned mixing over VGGT layers.
+    Pairwise head that performs scene- and/or pair-conditioned mixing over VGGT layers.
+
+    Mixing modes (via `mixing` argument):
+      - "scene": use only scene-level layer descriptors to compute weights (previous behaviour).
+      - "pair":  use only per-layer pair features to compute weights.
+      - "both":  combine scene and pair logits before softmax.
 
     This module assumes that each VGGT layer encodes co-visibility at a different scale.
     For each scene (batch element) it:
       1. Receives per-layer scene descriptors h_{b,l} (one descriptor per layer).
-      2. Predicts scene-specific mixture weights over layers via a small MLP + softmax.
+      2. Predicts mixture weights over layers via a small MLP + softmax,
+         using scene descriptors, pair features, or both, depending on `mixing`.
       3. Uses those weights to collapse multi-layer pair embeddings into a single embedding
          per view before applying a standard pairwise MLP head.
 
@@ -162,14 +168,28 @@ class SceneAwarePairwiseHead(nn.Module):
         hidden_dim: int = 512,
         dropout_p: float = 0.2,
         mixer_hidden_dim: int = 128,
+        mixing: str = "scene",
     ):
         super().__init__()
         inner_dim = max(1, hidden_dim // 2)
 
-        # MLP that maps per-layer scene descriptors to a scalar logit per layer.
+        mixing = mixing.lower()
+        if mixing not in {"scene", "pair", "both"}:
+            raise ValueError(f"Invalid mixing mode '{mixing}'. Expected one of ['scene', 'pair', 'both'].")
+        self.mixing = mixing
+
+        # Scene-level mixer: maps per-layer scene descriptors to a scalar logit per layer.
         # Applied independently to each (B, L, :) descriptor and then normalised with softmax.
         self.layer_mixer = nn.Sequential(
             nn.Linear(emb_dim, mixer_hidden_dim),
+            nn.GELU(),
+            nn.Linear(mixer_hidden_dim, 1),
+        )
+
+        # Pair-level mixer: maps per-layer pair features to a scalar logit per layer.
+        # Used when mixing in {'pair', 'both'}.
+        self.pair_mixer = nn.Sequential(
+            nn.Linear(4 * emb_dim, mixer_hidden_dim),
             nn.GELU(),
             nn.Linear(mixer_hidden_dim, 1),
         )
@@ -186,39 +206,73 @@ class SceneAwarePairwiseHead(nn.Module):
             nn.Linear(inner_dim, 1),
         )
 
-    def _mix_layers(
+    def _compute_layer_weights(
         self,
-        emb: torch.Tensor,
-        layer_descriptors: torch.Tensor,
+        emb_i: torch.Tensor,
+        emb_j: torch.Tensor,
+        layer_descriptors: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Collapse the L dimension using scene-conditioned mixture weights.
+        Compute mixing weights over layers for a batch of pairs.
 
-        emb: (B, L, E)
+        emb_i / emb_j: (B, L, E)
         layer_descriptors: (B, L, E)
         Returns:
-            mixed: (B, E)
+            weights: (B, L) softmax-normalised over L.
         """
-        if emb.ndim != 3 or layer_descriptors.ndim != 3:
+        if emb_i.ndim != 3 or emb_j.ndim != 3:
             raise ValueError(
-                f"SceneAwarePairwiseHead._mix_layers expects (B,L,E) tensors, "
-                f"got emb={emb.shape}, layer_descriptors={layer_descriptors.shape}"
+                "SceneAwarePairwiseHead._compute_layer_weights expects (B,L,E) tensors for emb_i and emb_j, "
+                f"got emb_i={emb_i.shape}, emb_j={emb_j.shape}"
             )
 
-        B, L, E = emb.shape
-        if layer_descriptors.shape != (B, L, E):
+        if emb_i.shape != emb_j.shape:
             raise ValueError(
-                f"layer_descriptors shape {layer_descriptors.shape} does not match emb shape {emb.shape}"
+                "Shape mismatch between emb_i and emb_j in _compute_layer_weights: "
+                f"emb_i={emb_i.shape}, emb_j={emb_j.shape}"
             )
 
-        # Compute logits per layer from scene descriptors: (B, L, 1) -> (B, L)
-        logits = self.layer_mixer(layer_descriptors).squeeze(-1)
+        B, L, E = emb_i.shape
+
+        logits = None
+
+        # Scene-level contribution
+        if self.mixing in {"scene", "both"}:
+            if layer_descriptors is None:
+                raise ValueError(
+                    "layer_descriptors must be provided when using 'scene' or 'both' mixing modes."
+                )
+            if layer_descriptors.ndim != 3 or layer_descriptors.shape != (B, L, E):
+                raise ValueError(
+                    "layer_descriptors must have shape (B, L, E) in _compute_layer_weights, "
+                    f"got {layer_descriptors.shape}"
+                )
+            scene_logits = self.layer_mixer(layer_descriptors).squeeze(-1)  # (B, L)
+            logits = scene_logits if logits is None else logits + scene_logits
+
+        # Pair-level contribution
+        if self.mixing in {"pair", "both"}:
+            # Per-layer pair features: (B, L, 4E)
+            pair_feat = torch.cat(
+                [
+                    emb_i,
+                    emb_j,
+                    (emb_i - emb_j).abs(),
+                    emb_i * emb_j,
+                ],
+                dim=-1,
+            )
+            pair_logits = self.pair_mixer(pair_feat).squeeze(-1)  # (B, L)
+            logits = pair_logits if logits is None else logits + pair_logits
+
+        if logits is None:
+            raise RuntimeError(
+                "No logits computed in _compute_layer_weights. This should not happen if mixing is one of "
+                "['scene', 'pair', 'both']."
+            )
+
         weights = torch.softmax(logits, dim=-1)  # (B, L)
-
-        # Weighted sum over layers.
-        weights = weights.view(B, L, 1)
-        mixed = (emb * weights).sum(dim=1)  # (B, E)
-        return mixed
+        return weights
 
     def forward(
         self,
@@ -229,12 +283,12 @@ class SceneAwarePairwiseHead(nn.Module):
         """
         emb_i / emb_j:
             - (B, E): single-layer embeddings, no mixing (falls back to standard head).
-            - (B, L, E): multi-layer embeddings to be mixed via scene-specific weights.
+            - (B, L, E): multi-layer embeddings to be mixed via scene/pair/both-conditioned weights.
 
         layer_descriptors:
-            - Required when emb_i/emb_j are (B, L, E).
+            - Required when mixing in {'scene', 'both'}; optional for 'pair'.
             - Should have shape (B, L, E) and encode per-layer scene context
-              (e.g., mean over views for that layer).
+              (e.g., mean over views for that layer) when provided.
 
         Returns:
             {"logits": (B,) tensor}
@@ -253,7 +307,7 @@ class SceneAwarePairwiseHead(nn.Module):
             logits = self.net(self.layernorm(pair_feat)).squeeze(-1)
             return {"logits": logits}
 
-        # Multi-layer case with scene-conditioned mixing.
+        # Multi-layer case with scene/pair/both-conditioned mixing.
         if emb_i.ndim != 3 or emb_j.ndim != 3:
             raise ValueError(
                 f"SceneAwarePairwiseHead expects emb_i/emb_j with ndim 2 or 3, "
@@ -266,22 +320,25 @@ class SceneAwarePairwiseHead(nn.Module):
                 f"got emb_i={emb_i.shape}, emb_j={emb_j.shape}"
             )
 
-        if layer_descriptors is None:
-            raise ValueError(
-                "layer_descriptors must be provided when using multi-layer embeddings "
-                "with SceneAwarePairwiseHead."
-            )
-
         B, L, E = emb_i.shape
-        if layer_descriptors.shape != (B, L, E):
+
+        if self.mixing in {"scene", "both"} and layer_descriptors is None:
+            raise ValueError(
+                "layer_descriptors must be provided when using 'scene' or 'both' mixing modes "
+                "with multi-layer embeddings."
+            )
+        if layer_descriptors is not None and layer_descriptors.shape != (B, L, E):
             raise ValueError(
                 f"layer_descriptors shape {layer_descriptors.shape} does not match "
                 f"multi-layer embedding shape {emb_i.shape}"
             )
 
-        # Scene-conditioned mixing: one set of weights per scene over layers.
-        mixed_i = self._mix_layers(emb_i, layer_descriptors)  # (B, E)
-        mixed_j = self._mix_layers(emb_j, layer_descriptors)  # (B, E)
+        # Scene- and/or pair-conditioned mixing: weights over layers per pair.
+        weights = self._compute_layer_weights(emb_i, emb_j, layer_descriptors)  # (B, L)
+        weights = weights.view(B, L, 1)
+
+        mixed_i = (emb_i * weights).sum(dim=1)  # (B, E)
+        mixed_j = (emb_j * weights).sum(dim=1)  # (B, E)
 
         pair_feat = torch.cat(
             [mixed_i, mixed_j, (mixed_i - mixed_j).abs(), mixed_i * mixed_j],
@@ -304,7 +361,8 @@ class VGGTHeadModel(nn.Module):
         token_proj_dim: int = 256,
         summary_tokens: int = 8,
         summary_heads: int = 4,
-        head_type : str = "base",
+        head_type: str = "base",
+        mixing_aware: Optional[str] = None,
     ):
         super().__init__()
         if device is None:
@@ -322,6 +380,7 @@ class VGGTHeadModel(nn.Module):
         self.summary_tokens = summary_tokens
         self.summary_heads = summary_heads
         self.head_type = head_type
+        self.mixing_aware = mixing_aware
 
         dtype = _resolve_torch_dtype(backbone_dtype)
         dtype_desc = "fp32" if dtype is None else str(dtype)
@@ -336,11 +395,21 @@ class VGGTHeadModel(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad_(False)
         print("[MODEL] Backbone ready.")
-        
-        if self.head_type in ["base"]:
-            self.head: Optional[PairwiseHead] = None
-        elif self.head_type in ["scene_aware"]:
-            self.head : Optional[SceneAwarePairwiseHead] = None
+
+        if self.head_type not in {"base", "scene_aware"}:
+            raise ValueError("head_type must be either 'base' or 'scene_aware'.")
+        if self.head_type == "scene_aware":
+            if self.mixing_aware is None:
+                raise ValueError("mixing_aware must be provided when head_type='scene_aware'.")
+            if self.mixing_aware not in {"pair", "scene", "both"}:
+                raise ValueError(
+                    "mixing_aware must be one of ['pair', 'scene', 'both'] when using a scene-aware head."
+                )
+        elif self.mixing_aware is not None:
+            raise ValueError("mixing_aware is only valid when head_type='scene_aware'.")
+
+        self.head: Optional[nn.Module]
+        self.head = None
             
         self.token_projector: Optional[nn.Linear] = None
         self.token_proj_norm: Optional[nn.LayerNorm] = None
@@ -362,20 +431,24 @@ class VGGTHeadModel(nn.Module):
         if self.head is not None:
             return
 
-        if self.head_type in ["base"]:
+        if self.head_type == "base":
             print(f"[MODEL] Initialising head with emb_dim={emb_dim}")
             self.head = PairwiseHead(
                 emb_dim=emb_dim,
                 hidden_dim=self.head_hidden_dim,
                 dropout_p=self.head_dropout,
             ).to(self.device)
-        elif self.head_type in ["scene_aware"]:
-            print(f"[MODEL] Initialising scene-aware head with emb_dim={emb_dim}")
+        elif self.head_type == "scene_aware":
+            print(
+                f"[MODEL] Initialising scene-aware head with emb_dim={emb_dim} "
+                f"(mixing={self.mixing_aware})"
+            )
             self.head = SceneAwarePairwiseHead(
                 emb_dim=emb_dim,
                 hidden_dim=self.head_hidden_dim,
                 dropout_p=self.head_dropout,
                 mixer_hidden_dim=128,
+                mixing=self.mixing_aware,
             ).to(self.device)
         else:
             raise ValueError(f"Unknown head_type '{self.head_type}'. Expected one of ['base', 'scene_aware'].")
@@ -645,16 +718,18 @@ class VGGTHeadModel(nn.Module):
             B_scenes, num_views, L, D = batch_view.shape
             _, P, _ = pair_idx.shape
 
-            # Scene-level descriptor per layer: mean over views -> (B, L, D)
-            scene_layer_desc = batch_view.mean(dim=1)
+            layer_descriptors = None
+            if self.mixing_aware in {"scene", "both"}:
+                # Scene-level descriptor per layer: mean over views -> (B, L, D)
+                scene_layer_desc = batch_view.mean(dim=1)
 
-            # Repeat descriptors per pair and flatten to (B*P, L, D)
-            layer_descriptors = (
-                scene_layer_desc
-                .unsqueeze(1)                 # (B, 1, L, D)
-                .expand(B_scenes, P, -1, -1)  # (B, P, L, D)
-                .reshape(-1, L, D)            # (B*P, L, D)
-            )
+                # Repeat descriptors per pair and flatten to (B*P, L, D)
+                layer_descriptors = (
+                    scene_layer_desc
+                    .unsqueeze(1)                 # (B, 1, L, D)
+                    .expand(B_scenes, P, -1, -1)  # (B, P, L, D)
+                    .reshape(-1, L, D)            # (B*P, L, D)
+                )
 
             logits = self.head(
                 emb_i,
@@ -693,6 +768,7 @@ class VGGTHeadModel(nn.Module):
         if (
             self.head_type == "scene_aware"
             and view_embeddings.dim() == 4  # (B, S, L, D)
+            and self.mixing_aware in {"scene", "both"}
         ):
             # Scene-level descriptor per layer: mean over S views.
             # shape: (B, L, D)
@@ -868,6 +944,13 @@ def main():
     parser.add_argument("--summary_tokens", type=int, default=8)
     parser.add_argument("--summary_heads", type=int, default=4)
     parser.add_argument(
+        "--mixing_aware",
+        type=str,
+        default=None,
+        choices=["pair", "scene", "both"],
+        help="Mixing strategy for the scene-aware head.",
+    )
+    parser.add_argument(
         "--head_type",
         type=str,
         default="base",
@@ -877,6 +960,11 @@ def main():
     parser.add_argument("--pair_indices", nargs="*", help="Optional pairs like '0-1 0-2'. Required when num_views>2.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+
+    if args.mixing_aware is not None and args.head_type != "scene_aware":
+        raise ValueError("--mixing_aware is only valid when --head_type is 'scene_aware'.")
+    if args.head_type == "scene_aware" and args.mixing_aware is None:
+        raise ValueError("Specify --mixing_aware when using --head_type scene_aware.")
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -912,6 +1000,7 @@ def main():
             summary_tokens=args.summary_tokens,
             summary_heads=args.summary_heads,
             head_type=args.head_type,
+            mixing_aware=args.mixing_aware,
         )
     except Exception as exc:
         print(f"[ERROR] Failed to load VGGTHeadModel: {exc}")
