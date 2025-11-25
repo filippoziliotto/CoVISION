@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from vggt_trainer.auxiliary_loss import triangle_transitivity_loss
+
 # Ensure repository root is importable for shared utilities.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -60,10 +62,15 @@ def run_epoch(
     max_steps: int,
     multiview: bool = False,
     return_preds: bool = False,
+    use_triangle_loss: bool = False,
+    triangle_loss_weight: float = 0.1,
 ) -> Dict[str, float]:
     is_train = optimizer is not None
     model.train(mode=is_train)
+    triangle_enabled = multiview and use_triangle_loss
     total_loss = 0.0
+    total_base_loss = 0.0
+    total_tri_loss = 0.0
     total_samples = 0
     all_probs = []
     all_labels = []
@@ -90,9 +97,14 @@ def run_epoch(
                     continue
                 if pair_idx.dim() != 2 or pair_idx.shape[1] != 2:
                     raise ValueError(f"Expected pair_idx shape (P,2), got {pair_idx.shape}")
+
+                strengths = batch.get("strengths", None)
+                if strengths is not None:
+                    strengths = strengths.to(model.device, non_blocking=True).view(-1)
             else:
                 pair_idx = None
                 labels = batch["label"].to(model.device, non_blocking=True).view(-1)
+                strengths = None
 
             # Use the recommended torch.amp.autocast API for CUDA.
             autocast_device = "cuda" if use_autocast else "cpu"
@@ -101,7 +113,26 @@ def run_epoch(
                 if logits.numel() == 0:
                     skipped_empty_pairs += 1
                     continue
-                loss = criterion(logits, labels)
+
+                base_loss = criterion(logits, labels)
+                tri_loss_val = 0.0
+
+                # Optional triangle / transitivity loss (multiview only).
+                if triangle_enabled:
+                    num_views = images.shape[0]  # one scene per batch: (N,3,H,W)
+                    tri_loss = triangle_transitivity_loss(
+                        pair_idx=pair_idx,          # (P,2)
+                        logits=logits,              # (P,)
+                        strengths=strengths,        # (P,) or None
+                        num_views=num_views,
+                        max_triangles=1024,
+                        margin=0.0,
+                        strength_threshold=0.5,     # tune or set to None
+                    )
+                    tri_loss_val = tri_loss.item()
+                    loss = base_loss + triangle_loss_weight * tri_loss
+                else:
+                    loss = base_loss
 
             if is_train:
                 optimizer.zero_grad(set_to_none=True)
@@ -113,6 +144,9 @@ def run_epoch(
             batch_size = labels.shape[0]
             total_samples += batch_size
             total_loss += loss.item() * batch_size
+            total_base_loss += base_loss.item() * batch_size
+            if triangle_enabled:
+                total_tri_loss += tri_loss_val * batch_size
 
             probs = torch.sigmoid(logits).detach().cpu()
             all_probs.append(probs)
@@ -166,6 +200,9 @@ def run_epoch(
         metrics = {"graph_IOU": float("nan"), "graph_AUC": float("nan")}
 
     metrics["loss"] = avg_loss
+    metrics["loss_bce"] = total_base_loss / max(1, total_samples)
+    if triangle_enabled:
+        metrics["loss_triangle"] = total_tri_loss / max(1, total_samples)
     if pred_records is not None:
         metrics["pred_records"] = pred_records
     if skipped_empty_pairs > 0:
@@ -373,6 +410,10 @@ def main():
     if args.head_type == "scene_aware" and args.mixing_aware is None:
         raise ValueError("Specify --mixing_aware when using --head_type scene_aware.")
 
+    triangle_enabled = args.use_triangle_loss and args.mode == "multiview"
+    if args.use_triangle_loss and not triangle_enabled:
+        print("[WARN] --use_triangle_loss is only applicable in multiview mode; ignoring.")
+
     if not args.save_ckpt_path:
         args.save_ckpt_path = f"runs/precomputed/{args.mode}/head_ckpt/best_head.pth"
     best_head_ckpt_path = Path(args.save_ckpt_path)
@@ -440,6 +481,7 @@ def main():
                 log_every=0,
                 max_steps=-1,
                 multiview=(args.mode == "multiview"),
+                use_triangle_loss=False,           # <--- ensure off for eval-only
             )
             print(
                 f"[EVAL-{eval_split.upper()}] loss={eval_metrics['loss']:.4f} "
@@ -463,6 +505,25 @@ def main():
             lr=args.lr,
             weight_decay=args.weight_decay,
         )
+        scheduler = None
+        if args.use_scheduler:
+            if args.scheduler_type == "plateau":
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    mode="max",
+                    factor=0.5,
+                    patience=2,
+                    threshold=1e-4,
+                )
+                print("[SETUP] LR scheduler: ReduceLROnPlateau on graph_AUC (factor=0.5, patience=2)")
+            elif args.scheduler_type == "step":
+                step_size = max(1, args.epochs // 3)
+                scheduler = torch.optim.lr_scheduler.StepLR(
+                    optimizer,
+                    step_size=step_size,
+                    gamma=0.5,
+                )
+                print(f"[SETUP] LR scheduler: StepLR every {step_size} epoch(s) (gamma=0.5)")
 
         best_graph_auc = -1.0
         best_pred_auc = float("-inf")
@@ -477,23 +538,32 @@ def main():
                 log_every=args.log_every,
                 max_steps=args.max_train_steps,
                 multiview=(args.mode == "multiview"),
+                use_triangle_loss=triangle_enabled,
+                triangle_loss_weight=args.triangle_loss_weight,
             )
+            loss_str = f"loss={train_metrics['loss']:.4f}"
+            if "loss_triangle" in train_metrics:
+                loss_str += (
+                    f" (bce={train_metrics['loss_bce']:.4f}, "
+                    f"tri={train_metrics['loss_triangle']:.4f})"
+                )
             print(
-                f"[TRAIN] epoch={epoch} loss={train_metrics['loss']:.4f} "
+                f"[TRAIN] epoch={epoch} {loss_str} "
                 f"graph_IOU={train_metrics['graph_IOU']:.4f} "
                 f"graph_AUC={train_metrics['graph_AUC']:.4f}"
             )
-            wandb_log(
-                wandb_run,
-                {
-                    "epoch": epoch,
-                    "train/loss": train_metrics["loss"],
-                    "train/graph_IOU": train_metrics["graph_IOU"],
-                    "train/graph_AUC": train_metrics["graph_AUC"],
-                },
-                step=epoch,
-            )
+            train_log = {
+                "epoch": epoch,
+                "train/loss": train_metrics["loss"],
+                "train/graph_IOU": train_metrics["graph_IOU"],
+                "train/graph_AUC": train_metrics["graph_AUC"],
+                "train/loss_bce": train_metrics["loss_bce"],
+            }
+            if "loss_triangle" in train_metrics:
+                train_log["train/loss_triangle"] = train_metrics["loss_triangle"]
+            wandb_log(wandb_run, train_log, step=epoch)
 
+            val_metrics = None
             if not args.skip_eval and val_loader is not None:
                 # Allow validation whenever a loader exists (multiview sets val_dataset=None).
                 val_metrics = run_epoch(
@@ -506,23 +576,30 @@ def main():
                     max_steps=-1,
                     multiview=(args.mode == "multiview"),
                     return_preds=(args.mode == "pairwise"),
+                    use_triangle_loss=False,  # keep validation loss focused on BCE
                 )
                 pred_records = val_metrics.pop("pred_records", None)
+                val_loss_str = f"loss={val_metrics['loss']:.4f}"
+                if "loss_triangle" in val_metrics:
+                    val_loss_str += (
+                        f" (bce={val_metrics['loss_bce']:.4f}, "
+                        f"tri={val_metrics['loss_triangle']:.4f})"
+                    )
                 print(
-                    f"[VAL]   epoch={epoch} loss={val_metrics['loss']:.4f} "
+                    f"[VAL]   epoch={epoch} {val_loss_str} "
                     f"graph_IOU={val_metrics['graph_IOU']:.4f} "
                     f"graph_AUC={val_metrics['graph_AUC']:.4f}"
                 )
-                wandb_log(
-                    wandb_run,
-                    {
-                        "epoch": epoch,
-                        "val/loss": val_metrics["loss"],
-                        "val/graph_IOU": val_metrics["graph_IOU"],
-                        "val/graph_AUC": val_metrics["graph_AUC"],
-                    },
-                    step=epoch,
-                )
+                val_log = {
+                    "epoch": epoch,
+                    "val/loss": val_metrics["loss"],
+                    "val/graph_IOU": val_metrics["graph_IOU"],
+                    "val/graph_AUC": val_metrics["graph_AUC"],
+                    "val/loss_bce": val_metrics["loss_bce"],
+                }
+                if "loss_triangle" in val_metrics:
+                    val_log["val/loss_triangle"] = val_metrics["loss_triangle"]
+                wandb_log(wandb_run, val_log, step=epoch)
                 if pred_records:
                     preds_dir = Path(args.output_dir) / args.dataset_type / args.mode
                     preds_path = preds_dir / "preds.csv"
@@ -568,6 +645,22 @@ def main():
                 if train_metrics["graph_AUC"] > best_graph_auc:
                     best_graph_auc = train_metrics["graph_AUC"]
                     save_best_head_weights(model, best_head_ckpt_path, wandb_run)
+
+            # Step LR scheduler after evaluating the epoch (prefers validation AUC).
+            scheduler_metric = val_metrics["graph_AUC"] if val_metrics is not None else train_metrics["graph_AUC"]
+            if scheduler is not None:
+                if args.scheduler_type == "plateau":
+                    if math.isfinite(scheduler_metric):
+                        scheduler.step(scheduler_metric)
+                    else:
+                        print("[LR] Skipping scheduler.step; graph_AUC is not finite.")
+                else:
+                    scheduler.step()
+
+            current_lr = optimizer.param_groups[0]["lr"]
+            wandb_log(wandb_run, {"lr": current_lr}, step=epoch)
+            metric_source = "val" if val_metrics is not None else "train"
+            print(f"[LR] epoch={epoch} lr={current_lr:.4e} (metric_source={metric_source})")
 
             if args.save_every > 0 and epoch % args.save_every == 0:
                 ckpt_path = output_dir / f"head_epoch{epoch}.pt"

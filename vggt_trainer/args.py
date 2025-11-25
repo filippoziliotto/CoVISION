@@ -216,6 +216,18 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate for the head.")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay for AdamW.")
     parser.add_argument("--grad_clip", type=float, default=0.0, help="Gradient clipping (0 disables).")
+    parser.add_argument(
+        "--use_scheduler",
+        action="store_true",
+        help="Enable learning rate scheduling (monitors graph_AUC when possible).",
+    )
+    parser.add_argument(
+        "--scheduler_type",
+        type=str,
+        default="plateau",
+        choices=["step", "plateau"],
+        help="Learning rate scheduler type. Only used when --use_scheduler is set.",
+    )
     parser.add_argument("--head_hidden_dim", type=int, default=512, help="Hidden size of the MLP head.")
     parser.add_argument("--head_dropout", type=float, default=0.2, help="Dropout probability inside the head.")
     parser.add_argument(
@@ -289,6 +301,18 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="No effect; only for wandb compatibility.",
     ) # default=False
+    parser.add_argument(
+        "--use_triangle_loss",
+        action="store_true",
+        help="Enable triangle/transitivity regulariser in multiview training.",
+    )
+    # optionally
+    parser.add_argument(
+        "--triangle_loss_weight",
+        type=float,
+        default=0.1,
+        help="Weight for the triangle/transitivity loss term.",
+    )
 
     return parser
 
