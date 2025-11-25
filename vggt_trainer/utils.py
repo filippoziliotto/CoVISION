@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import random
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple, Union
@@ -20,12 +21,29 @@ DeviceLike = Union[str, torch.device, None]
 
 
 def set_seed(seed: int):
-    """Seed Python, NumPy and Torch (CPU/GPU)."""
+    """Seed Python, NumPy and Torch (CPU/GPU) and enable deterministic kernels where possible."""
+    os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+        except Exception:
+            # Best-effort: TF32 flags are not available on all backends.
+            pass
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    try:
+        # warn_only avoids hard failures on ops without deterministic kernels.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except TypeError:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        # Some environments (e.g., older torch builds) may not support deterministic algos.
+        pass
 
 
 def resolve_device(device: DeviceLike = None) -> torch.device:

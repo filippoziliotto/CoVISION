@@ -44,6 +44,22 @@ HM3D_BASE_PATTERN = (
 )
 HM3D_PARTS = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "l"]
 
+def _seed_worker_factory(base_seed: int):
+    """Return a worker_init_fn that seeds python, numpy and torch deterministically."""
+    def _seed_worker(worker_id: int):
+        worker_seed = base_seed + worker_id
+        random.seed(worker_seed)
+        np.random.seed(worker_seed % (2**32 - 1))
+        torch.manual_seed(worker_seed)
+    return _seed_worker
+
+
+def _build_generator(seed: int) -> torch.Generator:
+    """Create a torch.Generator seeded for deterministic DataLoader shuffling."""
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return g
+
 # Collate helper for multiview scenes (one sample per batch).
 def collate_scene(batch):
     return batch[0]
@@ -488,10 +504,16 @@ def build_image_pair_dataloaders(
     )
     if computed_prefetch:
         loader_kwargs["prefetch_factor"] = computed_prefetch
+    train_generator = _build_generator(seed)
+    val_generator = _build_generator(seed + 1)
+    train_worker_init = _seed_worker_factory(seed)
+    val_worker_init = _seed_worker_factory(seed + 1)
 
     train_loader = DataLoader(
         train_dataset,
         shuffle=True,
+        generator=train_generator,
+        worker_init_fn=train_worker_init,
         **loader_kwargs,
     )
     val_loader = None
@@ -499,6 +521,8 @@ def build_image_pair_dataloaders(
         val_kwargs = dict(loader_kwargs)
         val_kwargs["batch_size"] = val_batch_size if val_batch_size is not None else batch_size
         val_kwargs["shuffle"] = False
+        val_kwargs["generator"] = val_generator
+        val_kwargs["worker_init_fn"] = val_worker_init
         val_loader = DataLoader(val_dataset, **val_kwargs)
 
     meta = dict(
@@ -684,6 +708,10 @@ def build_multiview_dataloaders(
         if prefetch_factor is not None and prefetch_factor > 0:
             computed_prefetch = prefetch_factor
     computed_persistent = persistent_workers if persistent_workers is not None else num_workers > 0
+    train_generator = _build_generator(seed)
+    val_generator = _build_generator(seed + 1)
+    train_worker_init = _seed_worker_factory(seed)
+    val_worker_init = _seed_worker_factory(seed + 1)
     loader_kwargs = dict(
         batch_size=batch_size,
         num_workers=num_workers,
@@ -698,6 +726,8 @@ def build_multiview_dataloaders(
     train_loader = DataLoader(
         train_ds,
         shuffle=True,
+        generator=train_generator,
+        worker_init_fn=train_worker_init,
         **loader_kwargs,
     )
     val_loader = None
@@ -705,6 +735,8 @@ def build_multiview_dataloaders(
         val_loader = DataLoader(
             val_ds,
             shuffle=False,
+            generator=val_generator,
+            worker_init_fn=val_worker_init,
             **loader_kwargs,
         )
 
@@ -844,6 +876,7 @@ def _loader_kwargs(
     device: Optional[str],
     prefetch_factor: Optional[int],
     persistent_workers: Optional[bool],
+    seed: Optional[int] = None,
     collate_fn=None,
 ):
     use_cuda_pinning = device is not None and str(device).startswith("cuda") and torch.cuda.is_available()
@@ -858,6 +891,9 @@ def _loader_kwargs(
         kwargs["collate_fn"] = collate_fn
     if prefetch_factor and num_workers > 0:
         kwargs["prefetch_factor"] = prefetch_factor
+    if seed is not None:
+        kwargs["generator"] = _build_generator(seed)
+        kwargs["worker_init_fn"] = _seed_worker_factory(seed)
     return kwargs
 
 
@@ -870,6 +906,7 @@ def build_precomputed_pair_dataloaders(
     device: Optional[str],
     prefetch_factor: Optional[int],
     persistent_workers: Optional[bool],
+    seed: int = 0,
     train_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
     val_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
@@ -889,6 +926,7 @@ def build_precomputed_pair_dataloaders(
             device=device,
             prefetch_factor=prefetch_factor,
             persistent_workers=persistent_workers,
+            seed=seed,
         ),
     )
     val_loader = None
@@ -902,6 +940,7 @@ def build_precomputed_pair_dataloaders(
                 device=device,
                 prefetch_factor=prefetch_factor,
                 persistent_workers=persistent_workers,
+                seed=seed + 1,
             ),
         )
 
@@ -922,6 +961,7 @@ def build_precomputed_multiview_dataloaders(
     device: Optional[str],
     prefetch_factor: Optional[int],
     persistent_workers: Optional[bool],
+    seed: int = 0,
     train_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
     val_transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
 ) -> Tuple[DataLoader, Optional[DataLoader], Dict]:
@@ -943,6 +983,7 @@ def build_precomputed_multiview_dataloaders(
             prefetch_factor=prefetch_factor,
             persistent_workers=persistent_workers,
             collate_fn=collate_scene,
+            seed=seed,
         ),
     )
     val_loader = None
@@ -957,6 +998,7 @@ def build_precomputed_multiview_dataloaders(
                 prefetch_factor=prefetch_factor,
                 persistent_workers=persistent_workers,
                 collate_fn=collate_scene,
+                seed=seed + 1,
             ),
         )
 
@@ -1068,6 +1110,7 @@ def build_precomputed_dataloaders_from_args(
             device=str(device) if device is not None else None,
             prefetch_factor=args.prefetch_factor,
             persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+            seed=args.seed,
             train_transform=train_transform,
             val_transform=val_transform,
         )
@@ -1079,6 +1122,7 @@ def build_precomputed_dataloaders_from_args(
             device=str(device) if device is not None else None,
             prefetch_factor=args.prefetch_factor,
             persistent_workers=_persistent_worker_flag(args.disable_persistent_workers),
+            seed=args.seed,
             train_transform=train_transform,
             val_transform=val_transform,
         )

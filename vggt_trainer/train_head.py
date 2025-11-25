@@ -127,7 +127,7 @@ def run_epoch(
                         num_views=num_views,
                         max_triangles=1024,
                         margin=0.0,
-                        strength_threshold=0.5,     # tune or set to None
+                        strength_threshold=0.15,     # tune or set to None
                     )
                     tri_loss_val = tri_loss.item()
                     loss = base_loss + triangle_loss_weight * tri_loss
