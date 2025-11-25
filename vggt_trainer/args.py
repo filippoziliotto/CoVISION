@@ -197,9 +197,11 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         help="Number of attention heads for the token summarizer.",
     )
     parser.add_argument(
-        "--use_gnn_head",
-        action="store_true",
-        help="If set, applies a GraphTransformer to view embeddings before the head.",
+        "--head_type",
+        type=str,
+        default="base",
+        choices=["base", "scene_aware"],
+        help="Head architecture to use on top of VGGT features.",
     )
 
     # Optimisation arguments

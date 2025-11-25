@@ -402,6 +402,8 @@ class PairImageDataset(Dataset):
                 depths = torch.stack([depth_i, depth_j], dim=0)
         sample = {
             "images": images,
+            "img_path_i": record.img_i,
+            "img_path_j": record.img_j,
             "label": torch.tensor(record.label, dtype=torch.float32),
             "strength": torch.tensor(record.strength, dtype=torch.float32),
             "scene_version": record.scene_version,

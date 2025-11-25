@@ -20,7 +20,6 @@ if str(REPO_ROOT / "vggt") not in sys.path:
     sys.path.append(str(REPO_ROOT / "vggt"))
 
 from vggt.vggt.models.vggt import VGGT
-from vggt_trainer.gnn import GraphTransformer
 
 
 class TokenSummarizer(nn.Module):
@@ -137,6 +136,160 @@ class PairwiseHead(nn.Module):
         return {"logits": logits}
 
 
+# ------------------------- Scene-Aware Pairwise Head -------------------------
+class SceneAwarePairwiseHead(nn.Module):
+    """
+    Pairwise head that performs scene-conditioned mixing over VGGT layers.
+
+    This module assumes that each VGGT layer encodes co-visibility at a different scale.
+    For each scene (batch element) it:
+      1. Receives per-layer scene descriptors h_{b,l} (one descriptor per layer).
+      2. Predicts scene-specific mixture weights over layers via a small MLP + softmax.
+      3. Uses those weights to collapse multi-layer pair embeddings into a single embedding
+         per view before applying a standard pairwise MLP head.
+
+    Expected shapes:
+        emb_i: (B, L, E)   # per-scene, per-layer embedding for view i
+        emb_j: (B, L, E)   # per-scene, per-layer embedding for view j
+        layer_descriptors: (B, L, E)  # scene-level descriptors per layer (e.g. mean over views)
+
+    If emb_i / emb_j are already single-layer (B, E), the head falls back to standard MLP mode.
+    """
+
+    def __init__(
+        self,
+        emb_dim: int,
+        hidden_dim: int = 512,
+        dropout_p: float = 0.2,
+        mixer_hidden_dim: int = 128,
+    ):
+        super().__init__()
+        inner_dim = max(1, hidden_dim // 2)
+
+        # MLP that maps per-layer scene descriptors to a scalar logit per layer.
+        # Applied independently to each (B, L, :) descriptor and then normalised with softmax.
+        self.layer_mixer = nn.Sequential(
+            nn.Linear(emb_dim, mixer_hidden_dim),
+            nn.GELU(),
+            nn.Linear(mixer_hidden_dim, 1),
+        )
+
+        # Standard pairwise MLP on mixed embeddings, same structure as PairwiseHead.
+        self.layernorm = nn.LayerNorm(4 * emb_dim)
+        self.net = nn.Sequential(
+            nn.Linear(4 * emb_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout_p),
+            nn.Linear(hidden_dim, inner_dim),
+            nn.GELU(),
+            nn.Dropout(dropout_p),
+            nn.Linear(inner_dim, 1),
+        )
+
+    def _mix_layers(
+        self,
+        emb: torch.Tensor,
+        layer_descriptors: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Collapse the L dimension using scene-conditioned mixture weights.
+
+        emb: (B, L, E)
+        layer_descriptors: (B, L, E)
+        Returns:
+            mixed: (B, E)
+        """
+        if emb.ndim != 3 or layer_descriptors.ndim != 3:
+            raise ValueError(
+                f"SceneAwarePairwiseHead._mix_layers expects (B,L,E) tensors, "
+                f"got emb={emb.shape}, layer_descriptors={layer_descriptors.shape}"
+            )
+
+        B, L, E = emb.shape
+        if layer_descriptors.shape != (B, L, E):
+            raise ValueError(
+                f"layer_descriptors shape {layer_descriptors.shape} does not match emb shape {emb.shape}"
+            )
+
+        # Compute logits per layer from scene descriptors: (B, L, 1) -> (B, L)
+        logits = self.layer_mixer(layer_descriptors).squeeze(-1)
+        weights = torch.softmax(logits, dim=-1)  # (B, L)
+
+        # Weighted sum over layers.
+        weights = weights.view(B, L, 1)
+        mixed = (emb * weights).sum(dim=1)  # (B, E)
+        return mixed
+
+    def forward(
+        self,
+        emb_i: torch.Tensor,
+        emb_j: torch.Tensor,
+        layer_descriptors: Optional[torch.Tensor] = None,
+    ) -> dict:
+        """
+        emb_i / emb_j:
+            - (B, E): single-layer embeddings, no mixing (falls back to standard head).
+            - (B, L, E): multi-layer embeddings to be mixed via scene-specific weights.
+
+        layer_descriptors:
+            - Required when emb_i/emb_j are (B, L, E).
+            - Should have shape (B, L, E) and encode per-layer scene context
+              (e.g., mean over views for that layer).
+
+        Returns:
+            {"logits": (B,) tensor}
+        """
+        # Single-layer case: behave like PairwiseHead on (B,E) embeddings.
+        if emb_i.ndim == 2:
+            if emb_j.ndim != 2 or emb_j.shape != emb_i.shape:
+                raise ValueError(
+                    f"SceneAwarePairwiseHead expects emb_j with shape {emb_i.shape} for single-layer mode, "
+                    f"got {emb_j.shape}"
+                )
+            pair_feat = torch.cat(
+                [emb_i, emb_j, (emb_i - emb_j).abs(), emb_i * emb_j],
+                dim=-1,
+            )
+            logits = self.net(self.layernorm(pair_feat)).squeeze(-1)
+            return {"logits": logits}
+
+        # Multi-layer case with scene-conditioned mixing.
+        if emb_i.ndim != 3 or emb_j.ndim != 3:
+            raise ValueError(
+                f"SceneAwarePairwiseHead expects emb_i/emb_j with ndim 2 or 3, "
+                f"got emb_i.ndim={emb_i.ndim}, emb_j.ndim={emb_j.ndim}"
+            )
+
+        if emb_i.shape != emb_j.shape:
+            raise ValueError(
+                f"emb_i and emb_j must have the same shape in multi-layer mode, "
+                f"got emb_i={emb_i.shape}, emb_j={emb_j.shape}"
+            )
+
+        if layer_descriptors is None:
+            raise ValueError(
+                "layer_descriptors must be provided when using multi-layer embeddings "
+                "with SceneAwarePairwiseHead."
+            )
+
+        B, L, E = emb_i.shape
+        if layer_descriptors.shape != (B, L, E):
+            raise ValueError(
+                f"layer_descriptors shape {layer_descriptors.shape} does not match "
+                f"multi-layer embedding shape {emb_i.shape}"
+            )
+
+        # Scene-conditioned mixing: one set of weights per scene over layers.
+        mixed_i = self._mix_layers(emb_i, layer_descriptors)  # (B, E)
+        mixed_j = self._mix_layers(emb_j, layer_descriptors)  # (B, E)
+
+        pair_feat = torch.cat(
+            [mixed_i, mixed_j, (mixed_i - mixed_j).abs(), mixed_i * mixed_j],
+            dim=-1,
+        )
+        logits = self.net(self.layernorm(pair_feat)).squeeze(-1)
+        return {"logits": logits}
+
 class VGGTHeadModel(nn.Module):
     """Frozen VGGT backbone that exposes pooled per-view embeddings to a trainable head."""
 
@@ -151,7 +304,7 @@ class VGGTHeadModel(nn.Module):
         token_proj_dim: int = 256,
         summary_tokens: int = 8,
         summary_heads: int = 4,
-        use_gnn_head: bool = False,
+        head_type : str = "base",
     ):
         super().__init__()
         if device is None:
@@ -168,7 +321,7 @@ class VGGTHeadModel(nn.Module):
         self.token_proj_dim = token_proj_dim
         self.summary_tokens = summary_tokens
         self.summary_heads = summary_heads
-        self.use_gnn_head = use_gnn_head
+        self.head_type = head_type
 
         dtype = _resolve_torch_dtype(backbone_dtype)
         dtype_desc = "fp32" if dtype is None else str(dtype)
@@ -183,27 +336,15 @@ class VGGTHeadModel(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad_(False)
         print("[MODEL] Backbone ready.")
-
-        self.head: Optional[PairwiseHead] = None
+        
+        if self.head_type in ["base"]:
+            self.head: Optional[PairwiseHead] = None
+        elif self.head_type in ["scene_aware"]:
+            self.head : Optional[SceneAwarePairwiseHead] = None
+            
         self.token_projector: Optional[nn.Linear] = None
         self.token_proj_norm: Optional[nn.LayerNorm] = None
         self.token_summarizer: Optional[TokenSummarizer] = None
-        self.gnn: Optional[GraphTransformer] = None
-
-    def _ensure_gnn(self, emb_dim: int):
-        if self.gnn is None:
-            self.gnn = GraphTransformer(
-                emb_dim=emb_dim,
-                # Use a shallower/lower-FFN GNN by default to keep parameter count small.
-                num_layers=1,
-                num_heads=4,
-                mlp_ratio=1.0,
-            ).to(self.device)
-        elif getattr(self.gnn, "emb_dim", emb_dim) != emb_dim:
-            raise ValueError(
-                f"Existing GNN expects emb_dim={self.gnn.emb_dim}, "
-                f"but received emb_dim={emb_dim}."
-            )
 
     def _ensure_batch_dim(self, images: torch.Tensor) -> torch.Tensor:
         """Guarantee a batch dimension for downstream encoding."""
@@ -218,13 +359,26 @@ class VGGTHeadModel(nn.Module):
         return self
 
     def _init_head_if_needed(self, emb_dim: int):
-        if self.head is None:
+        if self.head is not None:
+            return
+
+        if self.head_type in ["base"]:
             print(f"[MODEL] Initialising head with emb_dim={emb_dim}")
             self.head = PairwiseHead(
                 emb_dim=emb_dim,
                 hidden_dim=self.head_hidden_dim,
                 dropout_p=self.head_dropout,
             ).to(self.device)
+        elif self.head_type in ["scene_aware"]:
+            print(f"[MODEL] Initialising scene-aware head with emb_dim={emb_dim}")
+            self.head = SceneAwarePairwiseHead(
+                emb_dim=emb_dim,
+                hidden_dim=self.head_hidden_dim,
+                dropout_p=self.head_dropout,
+                mixer_hidden_dim=128,
+            ).to(self.device)
+        else:
+            raise ValueError(f"Unknown head_type '{self.head_type}'. Expected one of ['base', 'scene_aware'].")
 
     def _ensure_projector(self, input_dim: int):
         if self.token_proj_dim <= 0 or self.token_projector is not None:
@@ -439,31 +593,78 @@ class VGGTHeadModel(nn.Module):
     def score_pair_indices(self, view_embeddings: torch.Tensor, pair_idx: torch.Tensor) -> torch.Tensor:
         """
         Given per-view embeddings and pair indices (P,2), return logits (P,).
+
+        This helper is mainly intended for inference/debugging, where `view_embeddings`
+        typically comes from `encode_views`:
+            - (S, E)  for single-layer selection
+            - (S, L, E) for multi-layer selection
+
+        In the multi-layer case and with a scene-aware head, we:
+          1. Treat the input as a single-scene batch of shape (1, S, L, E),
+          2. Compute scene-level layer descriptors by averaging over views,
+          3. Repeat descriptors per pair and pass them to SceneAwarePairwiseHead.
         """
         if pair_idx.dim() == 2:
             pair_idx = pair_idx.unsqueeze(0)
         elif pair_idx.dim() != 3:
             raise ValueError(f"pair_idx must be (P,2) or (B,P,2), got {pair_idx.shape}")
 
+        # Normalise view embeddings to have an explicit batch dimension.
         if view_embeddings.dim() == 2:
-            batch_view = view_embeddings.unsqueeze(0)  # (1, S, D)
+            # (S, E) -> (1, S, E)
+            batch_view = view_embeddings.unsqueeze(0)
         elif view_embeddings.dim() == 3:
+            # Could be (S, L, E) or (B, S, E); disambiguate by aligning with pair_idx batch.
             if pair_idx.shape[0] == view_embeddings.shape[0] and pair_idx.shape[0] > 1:
-                batch_view = view_embeddings  # (B, S, D)
+                # Assume (B, S, E)
+                batch_view = view_embeddings
             else:
-                batch_view = view_embeddings.unsqueeze(0)  # (1, S, L, D) or (1, S, D)
+                # Assume single-scene multi-layer embeddings (S, L, E) -> (1, S, L, E)
+                batch_view = view_embeddings.unsqueeze(0)
         elif view_embeddings.dim() == 4:
-            batch_view = view_embeddings  # (B, S, L, D)
+            batch_view = view_embeddings  # (B, S, L, E)
         else:
             raise ValueError(f"Unexpected view_embeddings shape {view_embeddings.shape}")
 
         pair_idx = pair_idx.to(self.device)
+        batch_view = batch_view.to(self.device)
+
         emb_i, emb_j = self._gather_pair_embeddings(batch_view, pair_idx)
         if emb_i.numel() == 0:
             return torch.empty(0, device=self.device)
 
         self._init_head_if_needed(emb_dim=emb_i.shape[-1])
-        return self.head(emb_i, emb_j)["logits"]
+
+        # Scene-aware path for multi-layer embeddings.
+        if self.head_type == "scene_aware" and emb_i.ndim == 3:
+            if batch_view.dim() != 4:
+                raise ValueError(
+                    f"Scene-aware head expects multi-layer view embeddings shaped (B,S,L,D); "
+                    f"got {batch_view.shape}"
+                )
+            B_scenes, num_views, L, D = batch_view.shape
+            _, P, _ = pair_idx.shape
+
+            # Scene-level descriptor per layer: mean over views -> (B, L, D)
+            scene_layer_desc = batch_view.mean(dim=1)
+
+            # Repeat descriptors per pair and flatten to (B*P, L, D)
+            layer_descriptors = (
+                scene_layer_desc
+                .unsqueeze(1)                 # (B, 1, L, D)
+                .expand(B_scenes, P, -1, -1)  # (B, P, L, D)
+                .reshape(-1, L, D)            # (B*P, L, D)
+            )
+
+            logits = self.head(
+                emb_i,
+                emb_j,
+                layer_descriptors=layer_descriptors,
+            )["logits"]
+        else:
+            logits = self.head(emb_i, emb_j)["logits"]
+
+        return logits
 
     def score_pairs(
         self,
@@ -485,22 +686,45 @@ class VGGTHeadModel(nn.Module):
         view_embeddings = self._extract_view_embeddings(
             images, select_layers=True, keep_batch=True
         )
-        # If using GNN head, process view_embeddings through GraphTransformer.
-        if self.use_gnn_head:
-            # view_embeddings: (B, S, L, D) or (B, S, D)
-            if view_embeddings.dim() == 4:
-                # (B, S, L, D) -> (B, S, D) by averaging over L
-                view_embeddings = view_embeddings.mean(2)
-            # Now (B, S, D)
-            self._ensure_gnn(view_embeddings.shape[-1])
-            view_embeddings = self.gnn(view_embeddings)
+            
+        # Prepare layer descriptors if we have multi-layer embeddings
+        # and we are using the scene-aware head.
+        layer_descriptors = None
+        if (
+            self.head_type == "scene_aware"
+            and view_embeddings.dim() == 4  # (B, S, L, D)
+        ):
+            # Scene-level descriptor per layer: mean over S views.
+            # shape: (B, L, D)
+            scene_layer_desc = view_embeddings.mean(dim=1)
+
+            B_scenes, num_views, _, _ = view_embeddings.shape
+            _, P, _ = pair_indices.shape  # pair_indices is (B, P, 2) after normalisation
+
+            # We will flatten pairs as (B_scenes * P, L, D),
+            # so we need to repeat descriptors per pair.
+            layer_descriptors = (
+                scene_layer_desc
+                .unsqueeze(1)                 # (B, 1, L, D)
+                .expand(B_scenes, P, -1, -1)  # (B, P, L, D)
+                .reshape(-1, scene_layer_desc.shape[1], scene_layer_desc.shape[2])  # (B*P, L, D)
+            )
 
         emb_i, emb_j = self._gather_pair_embeddings(view_embeddings, pair_indices)
         if emb_i.numel() == 0:
             return torch.empty(0, device=self.device)
 
         self._init_head_if_needed(emb_dim=emb_i.shape[-1])
-        logits = self.head(emb_i, emb_j)["logits"]
+
+        if self.head_type == "scene_aware" and emb_i.ndim == 3:
+            logits = self.head(
+                emb_i,
+                emb_j,
+                layer_descriptors=layer_descriptors,
+            )["logits"]
+        else:
+            logits = self.head(emb_i, emb_j)["logits"]
+
         return logits
 
     @torch.no_grad()
@@ -558,8 +782,6 @@ class VGGTHeadModel(nn.Module):
             params += list(self.token_summarizer.parameters())
         if self.head is not None:
             params += list(self.head.parameters())
-        if self.gnn is not None:
-            params += list(self.gnn.parameters())
         return params
 
     def get_head_state(self) -> dict:
@@ -572,8 +794,6 @@ class VGGTHeadModel(nn.Module):
             state["token_proj_norm"] = self.token_proj_norm.state_dict()
         if self.token_summarizer is not None:
             state["token_summarizer"] = self.token_summarizer.state_dict()
-        if self.gnn is not None:
-            state["gnn"] = self.gnn.state_dict()
         return state
 
     def load_head_state(self, state_dict: dict):
@@ -589,10 +809,6 @@ class VGGTHeadModel(nn.Module):
             self.token_proj_norm.load_state_dict(state_dict["token_proj_norm"])
         if "token_summarizer" in state_dict and self.token_summarizer is not None:
             self.token_summarizer.load_state_dict(state_dict["token_summarizer"])
-        if "gnn" in state_dict:
-            if self.gnn is None:
-                raise RuntimeError("GNN must be initialised before loading weights.")
-            self.gnn.load_state_dict(state_dict["gnn"])
 
 def _parse_pair_indices_cli(raw_pairs: Optional[Sequence[str]], num_views: int) -> Optional[torch.Tensor]:
     """Parse CLI-friendly pair specs like ['0-1', '0,2'] into a tensor."""
@@ -651,6 +867,13 @@ def main():
     parser.add_argument("--token_proj_dim", type=int, default=256)
     parser.add_argument("--summary_tokens", type=int, default=8)
     parser.add_argument("--summary_heads", type=int, default=4)
+    parser.add_argument(
+        "--head_type",
+        type=str,
+        default="base",
+        choices=["base", "scene_aware"],
+        help="Head architecture to instantiate for the smoke test.",
+    )
     parser.add_argument("--pair_indices", nargs="*", help="Optional pairs like '0-1 0-2'. Required when num_views>2.")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
@@ -688,6 +911,7 @@ def main():
             token_proj_dim=args.token_proj_dim,
             summary_tokens=args.summary_tokens,
             summary_heads=args.summary_heads,
+            head_type=args.head_type,
         )
     except Exception as exc:
         print(f"[ERROR] Failed to load VGGTHeadModel: {exc}")

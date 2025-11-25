@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from sklearn.metrics import accuracy_score, average_precision_score, f1_score, roc_auc_score
 from tqdm import tqdm
 
@@ -31,6 +32,7 @@ from vggt_trainer.data import build_pair_dataloaders_from_args  # noqa: E402
 from vggt_trainer.model import VGGTHeadModel, _resolve_layer_indices  # noqa: E402
 from vggt_trainer.utils import (
     configure_torch_multiprocessing,
+    maybe_save_predictions_csv,
     resolve_device,
     set_seed,
 )  # noqa: E402
@@ -195,6 +197,7 @@ def zero_shot_eval(
     layer_mode: str,
     emb_mode: str,
     token_chunks: int = 4,
+    return_preds: bool = False,
 ) -> Dict[str, float]:
     """Run cosine-similarity covisibility predictions over a dataloader."""
     if loader is None:
@@ -205,6 +208,7 @@ def zero_shot_eval(
 
     all_scores, all_labels = [], []
     accs, f1s = [], []
+    pred_records = [] if return_preds else None
 
     for batch in tqdm(loader, desc="Zero-shot Eval", leave=False):
         images = batch["images"].to(model.device, non_blocking=True)
@@ -226,6 +230,23 @@ def zero_shot_eval(
         y_true = (labels >= 0.5).float().cpu().numpy()
         accs.append(accuracy_score(y_true, y_pred))
         f1s.append(f1_score(y_true, y_pred))
+
+        if return_preds and pred_records is not None:
+            paths_i = batch.get("img_path_i")
+            paths_j = batch.get("img_path_j")
+            if paths_i is not None and paths_j is not None:
+                paths_i_list = list(paths_i) if isinstance(paths_i, (list, tuple)) else [paths_i]
+                paths_j_list = list(paths_j) if isinstance(paths_j, (list, tuple)) else [paths_j]
+                labels_list = labels.detach().cpu().tolist()
+                preds_list = preds.detach().cpu().tolist()
+                if (
+                    len(paths_i_list) == len(paths_j_list) == len(preds_list)
+                    and len(labels_list) == len(preds_list)
+                ):
+                    for p_i, p_j, lbl, pred_val in zip(
+                        paths_i_list, paths_j_list, labels_list, preds_list
+                    ):
+                        pred_records.append((p_i, p_j, float(lbl), float(pred_val)))
 
     if not all_scores:
         return _empty_metrics()
@@ -274,7 +295,7 @@ def zero_shot_eval(
     graph_iou_best = float(np.max(ious))
     graph_iou_best_thres = float(thresholds[int(np.argmax(ious))])
 
-    return dict(
+    metrics = dict(
         loss=loss,
         acc=acc,
         f1=f1,
@@ -286,6 +307,9 @@ def zero_shot_eval(
         iou_thresholds=np.asarray(thresholds, dtype=np.float32),
         iou_curve=np.asarray(ious, dtype=np.float32),
     )
+    if return_preds and pred_records is not None:
+        metrics["pred_records"] = pred_records
+    return metrics
 
 
 def main():
@@ -323,6 +347,7 @@ def main():
         token_proj_dim=args.token_proj_dim,
         summary_tokens=args.summary_tokens,
         summary_heads=args.summary_heads,
+        head_type=args.head_type,
     )
 
     print("[EVAL] Running zero-shot on training split...")
@@ -344,10 +369,37 @@ def main():
             layer_mode=args.layer_mode,
             emb_mode=args.emb_mode,
             token_chunks=getattr(args, "token_chunks", 4),
+            return_preds=True,
         )
         print(f"[ZERO-SHOT][val]   {format_metric_line(val_metrics)}")
 
     if val_metrics is not None:
+        pred_records = val_metrics.pop("pred_records", None)
+        if pred_records:
+            preds_dir = Path(args.output_dir) / args.dataset_type / args.mode
+            preds_path = preds_dir / "preds.csv"
+            best_auc_path = preds_dir / "best_auc.txt"
+            imgs1, imgs2, labels_list, preds_list = zip(*pred_records)
+            best_auc, saved = maybe_save_predictions_csv(
+                imgs1,
+                imgs2,
+                labels_list,
+                preds_list,
+                val_metrics.get("roc_auc", float("nan")),
+                preds_path,
+                best_auc_path,
+            )
+            if saved:
+                print(f"[EVAL] Saved predictions to {preds_path} (roc_auc={best_auc:.4f})")
+            else:
+                auc_val = val_metrics.get("roc_auc", float("nan"))
+                if isinstance(auc_val, float) and math.isnan(auc_val):
+                    print("[EVAL] Skipped saving predictions; roc_auc is NaN.")
+                else:
+                    print(f"[EVAL] Skipped saving predictions; best roc_auc={best_auc:.4f}")
+        else:
+            print("[EVAL] No prediction records available to save.")
+
         plots_dir = os.path.join(args.output_dir, "zero_shot_plots")
         plot_iou_curves(
             train_metrics.get("iou_thresholds"),

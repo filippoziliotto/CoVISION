@@ -7,9 +7,11 @@ seed/device/metric helpers in each script.
 """
 from __future__ import annotations
 
+import csv
+import math
 import random
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -41,6 +43,59 @@ def ensure_dir(path: Union[str, Path]) -> Path:
     target = Path(path)
     target.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def _read_best_auc(best_auc_path: Optional[Union[str, Path]]) -> float:
+    """Read the stored best AUC value (returns -inf if missing/invalid)."""
+    if best_auc_path is None:
+        return float("-inf")
+    path = Path(best_auc_path)
+    if not path.is_file():
+        return float("-inf")
+    try:
+        return float(path.read_text().strip())
+    except Exception:
+        return float("-inf")
+
+
+def maybe_save_predictions_csv(
+    image_paths_1: Sequence[str],
+    image_paths_2: Sequence[str],
+    labels: Sequence[float],
+    preds: Sequence[float],
+    current_auc: float,
+    output_path: Union[str, Path],
+    best_auc_path: Optional[Union[str, Path]] = None,
+) -> Tuple[float, bool]:
+    """
+    Save a predictions CSV when the provided AUC improves over the stored best.
+
+    Returns (best_auc_after_update, saved_flag).
+    """
+    best_auc = _read_best_auc(best_auc_path)
+    try:
+        auc_val = float(current_auc)
+    except Exception:
+        return best_auc, False
+    if math.isnan(auc_val):
+        return best_auc, False
+    if auc_val <= best_auc:
+        return best_auc, False
+
+    out_path = Path(output_path)
+    ensure_dir(out_path.parent)
+    with out_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["image_1", "image_2", "label", "pred"])
+        for img1, img2, lbl, pred in zip(image_paths_1, image_paths_2, labels, preds):
+            writer.writerow([img1, img2, lbl, pred])
+
+    if best_auc_path is not None:
+        best_path = Path(best_auc_path)
+        ensure_dir(best_path.parent)
+        best_path.write_text(f"{auc_val:.6f}")
+
+    return auc_val, True
 
 
 def configure_torch_multiprocessing(num_workers: int, strategy: str = "file_system") -> None:
@@ -103,6 +158,7 @@ __all__ = [
     "compute_graph_metrics",
     "count_parameters",
     "ensure_dir",
+    "maybe_save_predictions_csv",
     "resolve_device",
     "set_seed",
 ]

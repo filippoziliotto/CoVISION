@@ -7,6 +7,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Dict, Optional
+import math
 
 import torch
 import torch.nn as nn
@@ -30,6 +31,7 @@ from vggt_trainer.utils import (
     compute_graph_metrics,
     count_parameters,
     ensure_dir,
+    maybe_save_predictions_csv,
     resolve_device,
     set_seed,
 )
@@ -57,6 +59,7 @@ def run_epoch(
     log_every: int,
     max_steps: int,
     multiview: bool = False,
+    return_preds: bool = False,
 ) -> Dict[str, float]:
     is_train = optimizer is not None
     model.train(mode=is_train)
@@ -65,6 +68,7 @@ def run_epoch(
     all_probs = []
     all_labels = []
     skipped_empty_pairs = 0
+    pred_records = [] if (return_preds and not multiview) else None
 
     if (not is_train) and torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -110,8 +114,38 @@ def run_epoch(
             total_samples += batch_size
             total_loss += loss.item() * batch_size
 
-            all_probs.append(torch.sigmoid(logits).detach().cpu())
+            probs = torch.sigmoid(logits).detach().cpu()
+            all_probs.append(probs)
             all_labels.append(labels.detach().cpu())
+
+            if pred_records is not None:
+                paths_i = batch.get("img_path_i")
+                paths_j = batch.get("img_path_j")
+                if paths_i is not None and paths_j is not None:
+                    if isinstance(paths_i, str):
+                        paths_i_list = [paths_i]
+                    elif isinstance(paths_i, (list, tuple)):
+                        paths_i_list = list(paths_i)
+                    else:
+                        paths_i_list = list(paths_i)
+
+                    if isinstance(paths_j, str):
+                        paths_j_list = [paths_j]
+                    elif isinstance(paths_j, (list, tuple)):
+                        paths_j_list = list(paths_j)
+                    else:
+                        paths_j_list = list(paths_j)
+
+                    labels_list = labels.detach().cpu().tolist()
+                    preds_list = probs.tolist()
+                    if (
+                        len(paths_i_list) == len(paths_j_list) == len(preds_list)
+                        and len(labels_list) == len(preds_list)
+                    ):
+                        for p_i, p_j, lbl, pred_val in zip(
+                            paths_i_list, paths_j_list, labels_list, preds_list
+                        ):
+                            pred_records.append((p_i, p_j, float(lbl), float(pred_val)))
 
             if is_train and log_every > 0 and step % log_every == 0:
                 avg_loss = total_loss / max(1, total_samples)
@@ -132,6 +166,8 @@ def run_epoch(
         metrics = {"graph_IOU": float("nan"), "graph_AUC": float("nan")}
 
     metrics["loss"] = avg_loss
+    if pred_records is not None:
+        metrics["pred_records"] = pred_records
     if skipped_empty_pairs > 0:
         metrics["skipped_empty_pairs"] = skipped_empty_pairs
         print(f"[INFO] Skipped {skipped_empty_pairs} batch(es) with no labeled pairs.")
@@ -245,10 +281,8 @@ def warmup_head(model: VGGTHeadModel, args, train_loader, train_dataset):
     """
     Run a tiny forward pass to instantiate the head before constructing the optimizer.
     """
-    def _ensure_head_and_gnn(emb_dim: int):
+    def _ensure_head(emb_dim: int):
         model._init_head_if_needed(emb_dim=emb_dim)
-        if getattr(model, "use_gnn_head", False):
-            model._ensure_gnn(emb_dim=emb_dim)
 
     if args.mode == "pairwise":
         if train_dataset is not None and len(train_dataset) > 0:
@@ -266,7 +300,7 @@ def warmup_head(model: VGGTHeadModel, args, train_loader, train_dataset):
         sample_scene = next(iter(train_loader))
         with torch.no_grad():
             emb_sample = model.encode_views(sample_scene["images"].to(model.device))
-            _ensure_head_and_gnn(emb_dim=emb_sample.shape[-1])
+            _ensure_head(emb_dim=emb_sample.shape[-1])
 
 
 def log_parameter_counts(model: VGGTHeadModel, wandb_run, step: Optional[int] = None):
@@ -370,7 +404,7 @@ def main():
             token_proj_dim=args.token_proj_dim,
             summary_tokens=args.summary_tokens,
             summary_heads=args.summary_heads,
-            use_gnn_head=getattr(args, "use_gnn_head", False),
+            head_type=args.head_type,
         )
 
         warmup_head(model, args, train_loader, train_dataset)
@@ -425,6 +459,7 @@ def main():
         )
 
         best_graph_auc = -1.0
+        best_pred_auc = float("-inf")
         for epoch in range(1, args.epochs + 1):
             print(f"\n[EPOCH {epoch}] -----------------------------")
             train_metrics = run_epoch(
@@ -464,7 +499,9 @@ def main():
                     log_every=0,
                     max_steps=-1,
                     multiview=(args.mode == "multiview"),
+                    return_preds=(args.mode == "pairwise"),
                 )
+                pred_records = val_metrics.pop("pred_records", None)
                 print(
                     f"[VAL]   epoch={epoch} loss={val_metrics['loss']:.4f} "
                     f"graph_IOU={val_metrics['graph_IOU']:.4f} "
@@ -480,6 +517,30 @@ def main():
                     },
                     step=epoch,
                 )
+                if pred_records:
+                    preds_dir = Path(args.output_dir) / args.dataset_type / args.mode
+                    preds_path = preds_dir / "preds.csv"
+                    best_auc_path = preds_dir / "best_auc.txt"
+                    imgs1, imgs2, labels_list, preds_list = zip(*pred_records)
+                    best_pred_auc, saved = maybe_save_predictions_csv(
+                        imgs1,
+                        imgs2,
+                        labels_list,
+                        preds_list,
+                        val_metrics.get("graph_AUC", float("nan")),
+                        preds_path,
+                        best_auc_path,
+                    )
+                    if saved:
+                        print(f"[VAL]   Saved predictions to {preds_path} (graph_AUC={best_pred_auc:.4f})")
+                    else:
+                        auc_val = val_metrics.get("graph_AUC", float("nan"))
+                        if isinstance(auc_val, float) and math.isnan(auc_val):
+                            print("[VAL]   Skipped saving predictions; graph_AUC is NaN.")
+                        else:
+                            print(f"[VAL]   Skipped saving predictions; best graph_AUC={best_pred_auc:.4f}")
+                else:
+                    print("[VAL]   No prediction records available to save.")
                 if val_metrics["graph_AUC"] > best_graph_auc:
                     best_graph_auc = val_metrics["graph_AUC"]
                     ckpt_path = output_dir / "best_head.pt"
