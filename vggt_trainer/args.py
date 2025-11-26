@@ -236,6 +236,11 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         default=-1,
         help="Optional limit on the number of training batches per epoch.",
     )
+    parser.add_argument(
+        "--use_focal_loss",
+        action="store_true",
+        help="Use focal loss instead of BCE for the primary classification term.",
+    )
 
     # Logging / checkpointing
     parser.add_argument(

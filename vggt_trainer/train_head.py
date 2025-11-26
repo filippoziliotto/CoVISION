@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from vggt_trainer.auxiliary_loss import triangle_transitivity_loss
+from vggt_trainer.auxiliary_loss import BinaryFocalLoss, triangle_transitivity_loss
 
 # Ensure repository root is importable for shared utilities.
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -191,6 +191,7 @@ def run_epoch(
 
     progress.close()
     avg_loss = total_loss / max(1, total_samples)
+    base_loss_avg = total_base_loss / max(1, total_samples)
 
     if all_probs:
         probs_np = torch.cat(all_probs, dim=0).numpy()
@@ -200,7 +201,9 @@ def run_epoch(
         metrics = {"graph_IOU": float("nan"), "graph_AUC": float("nan")}
 
     metrics["loss"] = avg_loss
-    metrics["loss_bce"] = total_base_loss / max(1, total_samples)
+    metrics["loss_primary"] = base_loss_avg
+    # Backward compatibility for wandb dashboards expecting BCE naming.
+    metrics["loss_bce"] = base_loss_avg
     if triangle_enabled:
         metrics["loss_triangle"] = total_tri_loss / max(1, total_samples)
     if pred_records is not None:
@@ -457,7 +460,12 @@ def main():
         warmup_head(model, args, train_loader, train_dataset)
         log_parameter_counts(model, wandb_run, step=0)
 
-        criterion = nn.BCEWithLogitsLoss()
+        if args.use_focal_loss:
+            criterion = BinaryFocalLoss()
+            print("[SETUP] Using focal loss for classification (alpha=0.25, gamma=2.0)")
+        else:
+            criterion = nn.BCEWithLogitsLoss()
+        base_loss_label = "focal" if args.use_focal_loss else "bce"
 
         if args.eval_ckpt_model:
             if not args.ckpt_path:
@@ -483,8 +491,10 @@ def main():
                 multiview=(args.mode == "multiview"),
                 use_triangle_loss=False,           # <--- ensure off for eval-only
             )
+            base_eval_loss = eval_metrics["loss_primary"]
             print(
                 f"[EVAL-{eval_split.upper()}] loss={eval_metrics['loss']:.4f} "
+                f"{base_loss_label}={base_eval_loss:.4f} "
                 f"graph_IOU={eval_metrics['graph_IOU']:.4f} "
                 f"graph_AUC={eval_metrics['graph_AUC']:.4f}"
             )
@@ -492,6 +502,9 @@ def main():
                 wandb_run,
                 {
                     f"{eval_split}/loss": eval_metrics["loss"],
+                    f"{eval_split}/loss_primary": eval_metrics["loss_primary"],
+                    # Legacy key.
+                    f"{eval_split}/loss_bce": eval_metrics["loss_bce"],
                     f"{eval_split}/graph_IOU": eval_metrics["graph_IOU"],
                     f"{eval_split}/graph_AUC": eval_metrics["graph_AUC"],
                 },
@@ -544,9 +557,11 @@ def main():
             loss_str = f"loss={train_metrics['loss']:.4f}"
             if "loss_triangle" in train_metrics:
                 loss_str += (
-                    f" (bce={train_metrics['loss_bce']:.4f}, "
+                    f" ({base_loss_label}={train_metrics['loss_primary']:.4f}, "
                     f"tri={train_metrics['loss_triangle']:.4f})"
                 )
+            else:
+                loss_str += f" ({base_loss_label}={train_metrics['loss_primary']:.4f})"
             print(
                 f"[TRAIN] epoch={epoch} {loss_str} "
                 f"graph_IOU={train_metrics['graph_IOU']:.4f} "
@@ -557,6 +572,8 @@ def main():
                 "train/loss": train_metrics["loss"],
                 "train/graph_IOU": train_metrics["graph_IOU"],
                 "train/graph_AUC": train_metrics["graph_AUC"],
+                "train/loss_primary": train_metrics["loss_primary"],
+                # Keep legacy key for dashboards expecting BCE naming.
                 "train/loss_bce": train_metrics["loss_bce"],
             }
             if "loss_triangle" in train_metrics:
@@ -576,15 +593,17 @@ def main():
                     max_steps=-1,
                     multiview=(args.mode == "multiview"),
                     return_preds=(args.mode == "pairwise"),
-                    use_triangle_loss=False,  # keep validation loss focused on BCE
+                    use_triangle_loss=False,  # keep validation loss focused on the primary classification term
                 )
                 pred_records = val_metrics.pop("pred_records", None)
                 val_loss_str = f"loss={val_metrics['loss']:.4f}"
                 if "loss_triangle" in val_metrics:
                     val_loss_str += (
-                        f" (bce={val_metrics['loss_bce']:.4f}, "
+                        f" ({base_loss_label}={val_metrics['loss_primary']:.4f}, "
                         f"tri={val_metrics['loss_triangle']:.4f})"
                     )
+                else:
+                    val_loss_str += f" ({base_loss_label}={val_metrics['loss_primary']:.4f})"
                 print(
                     f"[VAL]   epoch={epoch} {val_loss_str} "
                     f"graph_IOU={val_metrics['graph_IOU']:.4f} "
@@ -595,6 +614,8 @@ def main():
                     "val/loss": val_metrics["loss"],
                     "val/graph_IOU": val_metrics["graph_IOU"],
                     "val/graph_AUC": val_metrics["graph_AUC"],
+                    "val/loss_primary": val_metrics["loss_primary"],
+                    # Legacy compatibility.
                     "val/loss_bce": val_metrics["loss_bce"],
                 }
                 if "loss_triangle" in val_metrics:

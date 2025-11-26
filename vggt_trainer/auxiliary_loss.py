@@ -1,5 +1,60 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
+
+
+class BinaryFocalLoss(nn.Module):
+    """
+    Standard binary focal loss with logits.
+    """
+
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "mean"):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        return binary_focal_with_logits(
+            logits=logits,
+            targets=targets,
+            alpha=self.alpha,
+            gamma=self.gamma,
+            reduction=self.reduction,
+        )
+
+
+def binary_focal_with_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """
+    Compute binary focal loss given raw logits and binary targets.
+    """
+    targets = targets.to(dtype=logits.dtype)
+    ce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+
+    probs = torch.sigmoid(logits)
+    p_t = probs * targets + (1 - probs) * (1 - targets)
+
+    if alpha is not None:
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        ce_loss = alpha_t * ce_loss
+
+    focal_term = (1 - p_t).pow(gamma)
+    loss = focal_term * ce_loss
+
+    if reduction == "mean":
+        return loss.mean()
+    if reduction == "sum":
+        return loss.sum()
+    if reduction == "none":
+        return loss
+    raise ValueError(f"Unsupported reduction: {reduction}")
 
 
 def triangle_transitivity_loss(
@@ -136,3 +191,6 @@ def triangle_transitivity_loss(
         loss = violations.mean()
 
     return loss
+
+
+__all__ = ["BinaryFocalLoss", "binary_focal_with_logits", "triangle_transitivity_loss"]
