@@ -241,6 +241,17 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use focal loss instead of BCE for the primary classification term.",
     )
+    parser.add_argument(
+        "--use_early_stopping",
+        action="store_true",
+        help="Stop training when graph_AUC does not improve for a fixed patience window (alias --use_ealy_stopping).",
+    )
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=10,
+        help="Number of epochs without graph_AUC improvement before early stopping (only when enabled).",
+    )
 
     # Logging / checkpointing
     parser.add_argument(
@@ -270,7 +281,7 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wandb_project",
         type=str,
-        default="Co-Vision FT",
+        default="Co-Vision-FT",
         help="Weights & Biases project name (set None to disable).",
     )
     parser.add_argument(

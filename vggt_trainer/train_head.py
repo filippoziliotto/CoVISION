@@ -13,12 +13,11 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from vggt_trainer.auxiliary_loss import BinaryFocalLoss, triangle_transitivity_loss
-
 # Ensure repository root is importable for shared utilities.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+# All repo imports should go after this point.
 
 from vggt_trainer.args import build_vggt_trainer_parser
 from vggt_trainer.data import (
@@ -38,6 +37,7 @@ from vggt_trainer.utils import (
     set_seed,
 )
 from utils.utils import setup_wandb, wandb_finish, wandb_log, wandb_save
+from vggt_trainer.auxiliary_loss import BinaryFocalLoss, triangle_transitivity_loss
 
 
 def _train_augmentation_from_args(args) -> Optional[CoVggtAug]:
@@ -540,7 +540,11 @@ def main():
 
         best_graph_auc = -1.0
         best_pred_auc = float("-inf")
+        epochs_since_improve = 0
+        patience = max(1, args.early_stopping_patience)
+        last_epoch = 0
         for epoch in range(1, args.epochs + 1):
+            last_epoch = epoch
             print(f"\n[EPOCH {epoch}] -----------------------------")
             train_metrics = run_epoch(
                 model=model,
@@ -581,6 +585,7 @@ def main():
             wandb_log(wandb_run, train_log, step=epoch)
 
             val_metrics = None
+            improved = False
             if not args.skip_eval and val_loader is not None:
                 # Allow validation whenever a loader exists (multiview sets val_dataset=None).
                 val_metrics = run_epoch(
@@ -646,6 +651,7 @@ def main():
                 else:
                     print("[VAL]   No prediction records available to save.")
                 if val_metrics["graph_AUC"] > best_graph_auc:
+                    improved = True
                     best_graph_auc = val_metrics["graph_AUC"]
                     ckpt_path = output_dir / "best_head.pt"
                     save_head_checkpoint(
@@ -664,6 +670,7 @@ def main():
             else:
                 # Still keep track of the best training metric for logging.
                 if train_metrics["graph_AUC"] > best_graph_auc:
+                    improved = True
                     best_graph_auc = train_metrics["graph_AUC"]
                     save_best_head_weights(model, best_head_ckpt_path, wandb_run)
 
@@ -683,6 +690,18 @@ def main():
             metric_source = "val" if val_metrics is not None else "train"
             print(f"[LR] epoch={epoch} lr={current_lr:.4e} (metric_source={metric_source})")
 
+            if args.use_early_stopping:
+                if improved:
+                    epochs_since_improve = 0
+                else:
+                    epochs_since_improve += 1
+                    if epochs_since_improve >= patience:
+                        print(
+                            f"[STOP] Early stopping triggered after {epochs_since_improve} "
+                            f"epoch(s) without graph_AUC improvement."
+                        )
+                        break
+
             if args.save_every > 0 and epoch % args.save_every == 0:
                 ckpt_path = output_dir / f"head_epoch{epoch}.pt"
                 save_head_checkpoint(
@@ -695,7 +714,7 @@ def main():
                 )
                 wandb_save(wandb_run, str(ckpt_path))
 
-        wandb_log(wandb_run, {"best/graph_AUC": best_graph_auc}, step=args.epochs)
+        wandb_log(wandb_run, {"best/graph_AUC": best_graph_auc}, step=last_epoch)
         print(f"[DONE] Training finished. Best metric={best_graph_auc:.4f}")
     finally:
         wandb_finish(wandb_run)

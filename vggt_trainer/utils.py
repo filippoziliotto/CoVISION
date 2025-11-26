@@ -38,9 +38,9 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = False
     try:
         # warn_only avoids hard failures on ops without deterministic kernels.
-        torch.use_deterministic_algorithms(True, warn_only=True)
+        torch.use_deterministic_algorithms(False, warn_only=True)
     except TypeError:
-        torch.use_deterministic_algorithms(True)
+        torch.use_deterministic_algorithms(False)
     except Exception:
         # Some environments (e.g., older torch builds) may not support deterministic algos.
         pass
