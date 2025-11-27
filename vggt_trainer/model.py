@@ -169,6 +169,8 @@ class SceneAwarePairwiseHead(nn.Module):
         dropout_p: float = 0.2,
         mixer_hidden_dim: int = 128,
         mixing: str = "scene",
+        layer_pos_dim: int = 32,
+        max_layers: int = 32,
     ):
         super().__init__()
         inner_dim = max(1, hidden_dim // 2)
@@ -178,10 +180,15 @@ class SceneAwarePairwiseHead(nn.Module):
             raise ValueError(f"Invalid mixing mode '{mixing}'. Expected one of ['scene', 'pair', 'both'].")
         self.mixing = mixing
 
+        self.layer_pos_dim = layer_pos_dim
+        self.max_layers = max_layers
+        # Positional embedding over layer indices (0, 1, ..., L-1 up to max_layers).
+        self.layer_pos_emb = nn.Embedding(max_layers, layer_pos_dim)
+
         # Scene-level mixer: maps per-layer scene descriptors to a scalar logit per layer.
         # Applied independently to each (B, L, :) descriptor and then normalised with softmax.
         self.layer_mixer = nn.Sequential(
-            nn.Linear(emb_dim, mixer_hidden_dim),
+            nn.Linear(emb_dim + layer_pos_dim, mixer_hidden_dim),
             nn.GELU(),
             nn.Linear(mixer_hidden_dim, 1),
         )
@@ -247,7 +254,17 @@ class SceneAwarePairwiseHead(nn.Module):
                     "layer_descriptors must have shape (B, L, E) in _compute_layer_weights, "
                     f"got {layer_descriptors.shape}"
                 )
-            scene_logits = self.layer_mixer(layer_descriptors).squeeze(-1)  # (B, L)
+            if L > self.max_layers:
+                raise ValueError(
+                    f"Number of layers L={L} exceeds max_layers={self.max_layers} "
+                    "configured for SceneAwarePairwiseHead positional embeddings."
+                )
+            # Build per-layer positional embeddings based on layer indices.
+            layer_ids = torch.arange(L, device=emb_i.device).unsqueeze(0).expand(B, -1)  # (B, L)
+            layer_pos = self.layer_pos_emb(layer_ids)  # (B, L, layer_pos_dim)
+            # Concatenate scene descriptors with positional encoding along the feature dimension.
+            scene_input = torch.cat([layer_descriptors, layer_pos], dim=-1)  # (B, L, E + layer_pos_dim)
+            scene_logits = self.layer_mixer(scene_input).squeeze(-1)  # (B, L)
             logits = scene_logits if logits is None else logits + scene_logits
 
         # Pair-level contribution
