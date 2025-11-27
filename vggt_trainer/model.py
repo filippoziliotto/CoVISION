@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
+import math
 
 # Ensure repository root (and bundled vggt submodule) is importable.
 import sys
@@ -50,6 +51,92 @@ class TokenSummarizer(nn.Module):
         summary = self.norm(attended + queries)
         summary = summary + self.ffn(summary)
         return summary
+
+
+# ---------------------- CorrespondenceSummarizer ----------------------
+class CorrespondenceSummarizer(nn.Module):
+    """
+    Build a compact correspondence descriptor from per-view summary tokens.
+
+    This module assumes that each view-level embedding is obtained by flattening
+    `num_tokens` summary tokens of dimensionality `token_dim`:
+        emb_view: (B, num_tokens * token_dim)
+
+    Given a pair of embeddings (one per view), it:
+      1. Reshapes them back to (B, num_tokens, token_dim),
+      2. Computes a small similarity matrix between summary tokens of the two views,
+      3. Flattens this matrix and projects it to a low-dimensional descriptor.
+
+    This descriptor can be concatenated to standard pair features
+    [e_i, e_j, |e_i - e_j|, e_i * e_j] inside the classification head to expose
+    explicit correspondence information, while keeping the head lightweight.
+    """
+
+    def __init__(
+        self,
+        num_tokens: int,
+        token_dim: int,
+        corr_proj_dim: int = 32,
+    ):
+        super().__init__()
+        if num_tokens <= 0:
+            raise ValueError(f"num_tokens must be positive, got {num_tokens}")
+        if token_dim <= 0:
+            raise ValueError(f"token_dim must be positive, got {token_dim}")
+
+        self.num_tokens = num_tokens
+        self.token_dim = token_dim
+        self.scale = math.sqrt(float(token_dim))
+
+        # Two-layer MLP that maps the flattened similarity matrix (M*M)
+        # to a compact correspondence descriptor.
+        self.corr_mlp = nn.Sequential(
+            nn.Linear(num_tokens * num_tokens, corr_proj_dim),
+            nn.GELU(),
+            nn.Linear(corr_proj_dim, corr_proj_dim),
+        )
+
+    def forward(self, emb_i: torch.Tensor, emb_j: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            emb_i: (B, num_tokens * token_dim) embedding for view i.
+            emb_j: (B, num_tokens * token_dim) embedding for view j.
+
+        Returns:
+            corr_feat: (B, corr_proj_dim) correspondence descriptor.
+        """
+        if emb_i.dim() != 2 or emb_j.dim() != 2:
+            raise ValueError(
+                "CorrespondenceSummarizer expects 2D tensors shaped (B, num_tokens * token_dim); "
+                f"got emb_i={emb_i.shape}, emb_j={emb_j.shape}"
+            )
+        if emb_i.shape != emb_j.shape:
+            raise ValueError(
+                f"Shape mismatch between emb_i and emb_j: emb_i={emb_i.shape}, emb_j={emb_j.shape}"
+            )
+
+        B, E = emb_i.shape
+        expected_E = self.num_tokens * self.token_dim
+        if E != expected_E:
+            raise ValueError(
+                f"Expected embedding dimension {expected_E} (= num_tokens * token_dim), "
+                f"got {E}"
+            )
+
+        # Reshape back to (B, M, C)
+        tokens_i = emb_i.view(B, self.num_tokens, self.token_dim)
+        tokens_j = emb_j.view(B, self.num_tokens, self.token_dim)
+
+        # Similarity matrix between summary tokens of the two views: (B, M, M)
+        # We use a scaled dot-product, analogous to attention.
+        sim = torch.einsum("bmc,bnc->bmn", tokens_i, tokens_j) / self.scale
+
+        # Optionally, one could normalise 'sim' (e.g., with tanh or softmax) here,
+        # but we keep it raw and let the MLP learn appropriate transformations.
+        sim_flat = sim.reshape(B, self.num_tokens * self.num_tokens)
+
+        corr_feat = self.corr_mlp(sim_flat)
+        return corr_feat
 
 
 def _resolve_layer_indices(layer_mode: str, num_layers: int) -> Optional[Union[int, List[int]]]:
@@ -99,12 +186,47 @@ def _resolve_torch_dtype(name: str) -> Optional[torch.dtype]:
 class PairwiseHead(nn.Module):
     """Simple MLP head operating on concatenated pair embeddings."""
 
-    def __init__(self, emb_dim: int, hidden_dim: int = 512, dropout_p: float = 0.2):
+    def __init__(
+        self,
+        emb_dim: int,
+        hidden_dim: int = 512,
+        dropout_p: float = 0.2,
+        use_corr_features: bool = False,
+        num_summary_tokens: Optional[int] = None,
+        corr_proj_dim: int = 32,
+    ):
         super().__init__()
         inner_dim = max(1, hidden_dim // 2)
-        self.layernorm = nn.LayerNorm(4 * emb_dim)
+
+        self.use_corr_features = use_corr_features
+        self.corr_summarizer: Optional[CorrespondenceSummarizer] = None
+
+        base_feat_dim = 4 * emb_dim
+
+        if self.use_corr_features:
+            if num_summary_tokens is None:
+                raise ValueError(
+                    "num_summary_tokens must be provided when use_corr_features=True "
+                    "(expected to match VGGTHeadModel.summary_tokens)."
+                )
+            if emb_dim % num_summary_tokens != 0:
+                raise ValueError(
+                    f"emb_dim={emb_dim} is not divisible by num_summary_tokens={num_summary_tokens}; "
+                    "cannot recover per-token dimensionality for correspondence features."
+                )
+            token_dim = emb_dim // num_summary_tokens
+            self.corr_summarizer = CorrespondenceSummarizer(
+                num_tokens=num_summary_tokens,
+                token_dim=token_dim,
+                corr_proj_dim=corr_proj_dim,
+            )
+            feat_dim = base_feat_dim + corr_proj_dim
+        else:
+            feat_dim = base_feat_dim
+
+        self.layernorm = nn.LayerNorm(feat_dim)
         self.net = nn.Sequential(
-            nn.Linear(4 * emb_dim, hidden_dim),
+            nn.Linear(feat_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout_p),
             nn.Linear(hidden_dim, inner_dim),
@@ -130,6 +252,16 @@ class PairwiseHead(nn.Module):
             [emb_i, emb_j, (emb_i - emb_j).abs(), emb_i * emb_j],
             dim=-1,
         )
+
+        if self.use_corr_features:
+            if self.corr_summarizer is None:
+                raise RuntimeError(
+                    "corr_summarizer is None but use_corr_features=True; "
+                    "PairwiseHead was not initialised correctly."
+                )
+            corr_feat = self.corr_summarizer(emb_i, emb_j)
+            pair_feat = torch.cat([pair_feat, corr_feat], dim=-1)
+
         logits = self.net(self.layernorm(pair_feat)).squeeze(-1)
         if multi_layer:
             logits = logits.view(B, L).mean(dim=1)
@@ -398,6 +530,8 @@ class VGGTHeadModel(nn.Module):
         summary_heads: int = 4,
         head_type: str = "base",
         mixing_aware: Optional[str] = None,
+        use_corr_features: bool = False,
+        corr_proj_dim: int = 32,
     ):
         super().__init__()
         if device is None:
@@ -416,6 +550,8 @@ class VGGTHeadModel(nn.Module):
         self.summary_heads = summary_heads
         self.head_type = head_type
         self.mixing_aware = mixing_aware
+        self.use_corr_features = use_corr_features
+        self.corr_proj_dim = corr_proj_dim
 
         dtype = _resolve_torch_dtype(backbone_dtype)
         dtype_desc = "fp32" if dtype is None else str(dtype)
@@ -472,6 +608,9 @@ class VGGTHeadModel(nn.Module):
                 emb_dim=emb_dim,
                 hidden_dim=self.head_hidden_dim,
                 dropout_p=self.head_dropout,
+                use_corr_features=self.use_corr_features,
+                num_summary_tokens=self.summary_tokens if self.use_corr_features else None,
+                corr_proj_dim=self.corr_proj_dim,
             ).to(self.device)
         elif self.head_type == "scene_aware":
             print(
@@ -994,6 +1133,11 @@ def main():
     )
     parser.add_argument("--pair_indices", nargs="*", help="Optional pairs like '0-1 0-2'. Required when num_views>2.")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--use_corr_features",
+        action="store_true",
+        help="Enable correspondence-based features in the base head.",
+    )
     args = parser.parse_args()
 
     if args.mixing_aware is not None and args.head_type != "scene_aware":
@@ -1036,6 +1180,7 @@ def main():
             summary_heads=args.summary_heads,
             head_type=args.head_type,
             mixing_aware=args.mixing_aware,
+            use_corr_features=args.use_corr_features,
         )
     except Exception as exc:
         print(f"[ERROR] Failed to load VGGTHeadModel: {exc}")

@@ -455,6 +455,7 @@ def main():
             summary_heads=args.summary_heads,
             head_type=args.head_type,
             mixing_aware=args.mixing_aware,
+            use_corr_features=args.use_corr_features,
         )
 
         warmup_head(model, args, train_loader, train_dataset)

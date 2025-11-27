@@ -210,6 +210,11 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         choices=["base", "scene_aware"],
         help="Head architecture to use on top of VGGT features.",
     )
+    parser.add_argument(
+        "--use_corr_features",
+        action="store_true",
+        help="Augment pair features with correspondence summaries inside the base head.",
+    )
 
     # Optimisation arguments
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs.")
