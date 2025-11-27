@@ -211,6 +211,7 @@ class PairwiseHead(nn.Module):
         hidden_dim: int = 512,
         dropout_p: float = 0.2,
         use_corr_features: bool = False,
+        use_corr_refine: bool = False,
         num_summary_tokens: Optional[int] = None,
         corr_proj_dim: int = 32,
     ):
@@ -218,14 +219,19 @@ class PairwiseHead(nn.Module):
         inner_dim = max(1, hidden_dim // 2)
 
         self.use_corr_features = use_corr_features
+        self.use_corr_refine = use_corr_refine
         self.corr_summarizer: Optional[CorrespondenceSummarizer] = None
 
         base_feat_dim = 4 * emb_dim
 
-        if self.use_corr_features:
+        # We need a CorrespondenceSummarizer whenever we either concatenate
+        # per-layer correspondence features (use_corr_features) or build a
+        # cross-layer refinement signal (use_corr_refine). Only the former
+        # increases the input dimensionality of the MLP.
+        if self.use_corr_features or self.use_corr_refine:
             if num_summary_tokens is None:
                 raise ValueError(
-                    "num_summary_tokens must be provided when use_corr_features=True "
+                    "num_summary_tokens must be provided when use_corr_features=True or use_corr_refine=True "
                     "(expected to match VGGTHeadModel.summary_tokens)."
                 )
             if emb_dim % num_summary_tokens != 0:
@@ -239,6 +245,8 @@ class PairwiseHead(nn.Module):
                 token_dim=token_dim,
                 corr_proj_dim=corr_proj_dim,
             )
+
+        if self.use_corr_features:
             feat_dim = base_feat_dim + corr_proj_dim
         else:
             feat_dim = base_feat_dim
@@ -254,6 +262,17 @@ class PairwiseHead(nn.Module):
             nn.Linear(inner_dim, 1),
         )
 
+        # Optional cross-layer refinement head over correspondence descriptors:
+        # it looks at how the correspondence descriptor changes from the first
+        # to the last selected layer and produces a single scalar logit per pair.
+        self.corr_refine_mlp: Optional[nn.Module] = None
+        if self.use_corr_refine:
+            self.corr_refine_mlp = nn.Sequential(
+                nn.Linear(3 * corr_proj_dim, corr_proj_dim),
+                nn.GELU(),
+                nn.Linear(corr_proj_dim, 1),
+            )
+
     def forward(self, emb_i: torch.Tensor, emb_j: torch.Tensor) -> dict:
         """
         emb_i / emb_j shapes:
@@ -261,6 +280,7 @@ class PairwiseHead(nn.Module):
             - (B, L, E) for multi-layer selections
         """
         multi_layer = False
+        B = L = None  # populated only for multi-layer case
         if emb_i.ndim == 3:
             multi_layer = True
             B, L, E = emb_i.shape
@@ -272,18 +292,43 @@ class PairwiseHead(nn.Module):
             dim=-1,
         )
 
-        if self.use_corr_features:
+        corr_feat = None
+        if self.use_corr_features or self.use_corr_refine:
             if self.corr_summarizer is None:
                 raise RuntimeError(
-                    "corr_summarizer is None but use_corr_features=True; "
+                    "corr_summarizer is None but use_corr_features/use_corr_refine=True; "
                     "PairwiseHead was not initialised correctly."
                 )
             corr_feat = self.corr_summarizer(emb_i, emb_j)
-            pair_feat = torch.cat([pair_feat, corr_feat], dim=-1)
+            if self.use_corr_features:
+                pair_feat = torch.cat([pair_feat, corr_feat], dim=-1)
 
         logits = self.net(self.layernorm(pair_feat)).squeeze(-1)
+
         if multi_layer:
+            # Base behaviour: mean over per-layer logits.
             logits = logits.view(B, L).mean(dim=1)
+
+            # Optional cross-layer refinement: look at how correspondence descriptors
+            # evolve between the first and last selected layer and add a scalar bias.
+            if self.use_corr_refine and corr_feat is not None:
+                if self.corr_refine_mlp is None:
+                    raise RuntimeError(
+                        "corr_refine_mlp is None but use_corr_refine=True; "
+                        "PairwiseHead was not initialised correctly."
+                    )
+                # corr_feat was computed on flattened (B*L, :) embeddings; reshape back.
+                corr_feat_seq = corr_feat.view(B, L, -1)  # (B, L, D_corr)
+                first_corr = corr_feat_seq[:, 0, :]       # (B, D_corr)
+                last_corr = corr_feat_seq[:, -1, :]       # (B, D_corr)
+                delta_corr = last_corr - first_corr       # (B, D_corr)
+                refine_input = torch.cat(
+                    [first_corr, last_corr, delta_corr],
+                    dim=-1,
+                )  # (B, 3*D_corr)
+                refine_logit = self.corr_refine_mlp(refine_input).squeeze(-1)  # (B,)
+                logits = logits + refine_logit
+
         return {"logits": logits}
 
 
@@ -550,6 +595,7 @@ class VGGTHeadModel(nn.Module):
         head_type: str = "base",
         mixing_aware: Optional[str] = None,
         use_corr_features: bool = False,
+        use_corr_refine: bool = False,
         corr_proj_dim: int = 32,
     ):
         super().__init__()
@@ -570,6 +616,7 @@ class VGGTHeadModel(nn.Module):
         self.head_type = head_type
         self.mixing_aware = mixing_aware
         self.use_corr_features = use_corr_features
+        self.use_corr_refine = use_corr_refine
         self.corr_proj_dim = corr_proj_dim
 
         dtype = _resolve_torch_dtype(backbone_dtype)
@@ -628,7 +675,10 @@ class VGGTHeadModel(nn.Module):
                 hidden_dim=self.head_hidden_dim,
                 dropout_p=self.head_dropout,
                 use_corr_features=self.use_corr_features,
-                num_summary_tokens=self.summary_tokens if self.use_corr_features else None,
+                use_corr_refine=self.use_corr_refine,
+                num_summary_tokens=self.summary_tokens
+                if (self.use_corr_features or self.use_corr_refine)
+                else None,
                 corr_proj_dim=self.corr_proj_dim,
             ).to(self.device)
         elif self.head_type == "scene_aware":
@@ -1157,6 +1207,11 @@ def main():
         action="store_true",
         help="Enable correspondence-based features in the base head.",
     )
+    parser.add_argument(
+        "--use_corr_refine",
+        action="store_true",
+        help="Enable cross-layer refinement based on correspondence descriptors in the base head.",
+    )
     args = parser.parse_args()
 
     if args.mixing_aware is not None and args.head_type != "scene_aware":
@@ -1200,6 +1255,7 @@ def main():
             head_type=args.head_type,
             mixing_aware=args.mixing_aware,
             use_corr_features=args.use_corr_features,
+            use_corr_refine=args.use_corr_refine,
         )
     except Exception as exc:
         print(f"[ERROR] Failed to load VGGTHeadModel: {exc}")

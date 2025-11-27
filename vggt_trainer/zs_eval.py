@@ -355,6 +355,7 @@ def main():
         head_type=args.head_type,
         mixing_aware=args.mixing_aware,
         use_corr_features=args.use_corr_features,
+        use_corr_refine=args.use_corr_refine,
     )
 
     print("[EVAL] Running zero-shot on training split...")

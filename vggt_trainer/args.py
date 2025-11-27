@@ -215,6 +215,11 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Augment pair features with correspondence summaries inside the base head.",
     )
+    parser.add_argument(
+        "--use_corr_refine",
+        action="store_true",
+        help="Enable cross-layer refinement using correspondence descriptors (requires multi-layer features).",
+    )
 
     # Optimisation arguments
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs.")
