@@ -171,6 +171,7 @@ class SceneAwarePairwiseHead(nn.Module):
         mixing: str = "scene",
         layer_pos_dim: int = 32,
         max_layers: int = 32,
+        scene_uniform_blend: float = 1.0,
     ):
         super().__init__()
         inner_dim = max(1, hidden_dim // 2)
@@ -179,6 +180,12 @@ class SceneAwarePairwiseHead(nn.Module):
         if mixing not in {"scene", "pair", "both"}:
             raise ValueError(f"Invalid mixing mode '{mixing}'. Expected one of ['scene', 'pair', 'both'].")
         self.mixing = mixing
+
+        if not (0.0 <= scene_uniform_blend <= 1.0):
+            raise ValueError(
+                f"scene_uniform_blend must be in [0,1], got {scene_uniform_blend}"
+            )
+        self.scene_uniform_blend = scene_uniform_blend
 
         self.layer_pos_dim = layer_pos_dim
         self.max_layers = max_layers
@@ -289,6 +296,17 @@ class SceneAwarePairwiseHead(nn.Module):
             )
 
         weights = torch.softmax(logits, dim=-1)  # (B, L)
+
+        # Optional residual blending of scene-dependent weights with a uniform distribution over layers.
+        # This keeps a uniform component (like the base head) and adds a scene-dependent bias:
+        #   alpha_final = (1 - epsilon) * U + epsilon * alpha_scene
+        # where U is the uniform distribution over L layers and epsilon = scene_uniform_blend.
+        if self.mixing in {"scene", "both"} and self.scene_uniform_blend < 1.0:
+            B, L = weights.shape
+            uniform = weights.new_full((B, L), 1.0 / float(L))
+            eps = self.scene_uniform_blend
+            weights = (1.0 - eps) * uniform + eps * weights
+
         return weights
 
     def forward(
