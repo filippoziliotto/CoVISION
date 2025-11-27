@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
 # Ensure repository root (and bundled vggt submodule) is importable.
@@ -86,12 +87,13 @@ class CorrespondenceSummarizer(nn.Module):
 
         self.num_tokens = num_tokens
         self.token_dim = token_dim
-        self.scale = math.sqrt(float(token_dim))
 
-        # Two-layer MLP that maps the flattened similarity matrix (M*M)
-        # to a compact correspondence descriptor.
+        # Two-layer MLP that maps pooled similarity statistics
+        # (row/column/global max/mean) to a compact correspondence descriptor.
+        # Feature dimension: 4 * num_tokens (row/col max/mean) + 2 (global max/mean).
+        pooled_feat_dim = 4 * num_tokens + 2
         self.corr_mlp = nn.Sequential(
-            nn.Linear(num_tokens * num_tokens, corr_proj_dim),
+            nn.Linear(pooled_feat_dim, corr_proj_dim),
             nn.GELU(),
             nn.Linear(corr_proj_dim, corr_proj_dim),
         )
@@ -127,15 +129,32 @@ class CorrespondenceSummarizer(nn.Module):
         tokens_i = emb_i.view(B, self.num_tokens, self.token_dim)
         tokens_j = emb_j.view(B, self.num_tokens, self.token_dim)
 
-        # Similarity matrix between summary tokens of the two views: (B, M, M)
-        # We use a scaled dot-product, analogous to attention.
-        sim = torch.einsum("bmc,bnc->bmn", tokens_i, tokens_j) / self.scale
+        # Cosine-style similarity matrix between summary tokens of the two views: (B, M, M)
+        tokens_i = F.normalize(tokens_i, p=2, dim=-1)
+        tokens_j = F.normalize(tokens_j, p=2, dim=-1)
+        sim = torch.einsum("bmc,bnc->bmn", tokens_i, tokens_j)
 
-        # Optionally, one could normalise 'sim' (e.g., with tanh or softmax) here,
-        # but we keep it raw and let the MLP learn appropriate transformations.
-        sim_flat = sim.reshape(B, self.num_tokens * self.num_tokens)
+        # Row/column/global pooling of similarity statistics.
+        # Row: how each token in view i matches tokens in view j.
+        row_max, _ = sim.max(dim=2)   # (B, M)
+        row_mean = sim.mean(dim=2)    # (B, M)
 
-        corr_feat = self.corr_mlp(sim_flat)
+        # Column: how each token in view j matches tokens in view i.
+        col_max, _ = sim.max(dim=1)   # (B, M)
+        col_mean = sim.mean(dim=1)    # (B, M)
+
+        # Global statistics over all token pairs.
+        sim_flat_all = sim.view(B, self.num_tokens * self.num_tokens)
+        global_max, _ = sim_flat_all.max(dim=1, keepdim=True)   # (B, 1)
+        global_mean = sim_flat_all.mean(dim=1, keepdim=True)    # (B, 1)
+
+        # Concatenate all pooled features into a single descriptor.
+        pooled_stats = torch.cat(
+            [row_max, row_mean, col_max, col_mean, global_max, global_mean],
+            dim=-1,
+        )  # shape: (B, 4 * M + 2)
+
+        corr_feat = self.corr_mlp(pooled_stats)
         return corr_feat
 
 
