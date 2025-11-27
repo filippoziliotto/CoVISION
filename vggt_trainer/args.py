@@ -220,6 +220,11 @@ def build_vggt_trainer_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable cross-layer refinement using correspondence descriptors (requires multi-layer features).",
     )
+    parser.add_argument(
+        "--use_layer_moe",
+        action="store_true",
+        help="Use a layer-wise gating Mixture-of-Experts when multiple layers are selected.",
+    )
 
     # Optimisation arguments
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs.")

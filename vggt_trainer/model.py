@@ -212,6 +212,7 @@ class PairwiseHead(nn.Module):
         dropout_p: float = 0.2,
         use_corr_features: bool = False,
         use_corr_refine: bool = False,
+        use_layer_moe: bool = False,
         num_summary_tokens: Optional[int] = None,
         corr_proj_dim: int = 32,
     ):
@@ -220,6 +221,7 @@ class PairwiseHead(nn.Module):
 
         self.use_corr_features = use_corr_features
         self.use_corr_refine = use_corr_refine
+        self.use_layer_moe = use_layer_moe
         self.corr_summarizer: Optional[CorrespondenceSummarizer] = None
 
         base_feat_dim = 4 * emb_dim
@@ -262,6 +264,18 @@ class PairwiseHead(nn.Module):
             nn.Linear(inner_dim, 1),
         )
 
+        # Optional gating network for layer-wise Mixture-of-Experts behaviour.
+        # It produces one scalar logit per layer from the same normalised pair features
+        # used by the main MLP and is only used in the multi-layer case.
+        self.gate_mlp: Optional[nn.Module] = None
+        if self.use_layer_moe:
+            gate_hidden_dim = max(1, hidden_dim // 2)
+            self.gate_mlp = nn.Sequential(
+                nn.Linear(feat_dim, gate_hidden_dim),
+                nn.GELU(),
+                nn.Linear(gate_hidden_dim, 1),
+            )
+
         # Optional cross-layer refinement head over correspondence descriptors:
         # it looks at how the correspondence descriptor changes from the first
         # to the last selected layer and produces a single scalar logit per pair.
@@ -303,11 +317,29 @@ class PairwiseHead(nn.Module):
             if self.use_corr_features:
                 pair_feat = torch.cat([pair_feat, corr_feat], dim=-1)
 
-        logits = self.net(self.layernorm(pair_feat)).squeeze(-1)
+        # Shared normalisation for both the main MLP and (optionally) the gate.
+        normed_pair_feat = self.layernorm(pair_feat)
+        logits_flat = self.net(normed_pair_feat).squeeze(-1)
 
         if multi_layer:
-            # Base behaviour: mean over per-layer logits.
-            logits = logits.view(B, L).mean(dim=1)
+            # Per-layer logits reshaped back to (B, L).
+            logits_per_layer = logits_flat.view(B, L)
+
+            if self.use_layer_moe:
+                if self.gate_mlp is None:
+                    raise RuntimeError(
+                        "gate_mlp is None but use_layer_moe=True; "
+                        "PairwiseHead was not initialised correctly."
+                    )
+                # Compute gating weights from the same normalised features.
+                gate_logits_flat = self.gate_mlp(normed_pair_feat).squeeze(-1)  # (B*L,)
+                gate_logits = gate_logits_flat.view(B, L)
+                gate_weights = torch.softmax(gate_logits, dim=-1)               # (B, L)
+                # Mixture-of-experts over layers: weighted sum of per-layer logits.
+                logits = (gate_weights * logits_per_layer).sum(dim=1)           # (B,)
+            else:
+                # Base behaviour: uniform average over layers.
+                logits = logits_per_layer.mean(dim=1)
 
             # Optional cross-layer refinement: look at how correspondence descriptors
             # evolve between the first and last selected layer and add a scalar bias.
@@ -328,6 +360,9 @@ class PairwiseHead(nn.Module):
                 )  # (B, 3*D_corr)
                 refine_logit = self.corr_refine_mlp(refine_input).squeeze(-1)  # (B,)
                 logits = logits + refine_logit
+        else:
+            # Single-layer case: logits_flat already has shape (B,).
+            logits = logits_flat
 
         return {"logits": logits}
 
@@ -596,6 +631,7 @@ class VGGTHeadModel(nn.Module):
         mixing_aware: Optional[str] = None,
         use_corr_features: bool = False,
         use_corr_refine: bool = False,
+        use_layer_moe: bool = False,
         corr_proj_dim: int = 32,
     ):
         super().__init__()
@@ -618,6 +654,7 @@ class VGGTHeadModel(nn.Module):
         self.use_corr_features = use_corr_features
         self.use_corr_refine = use_corr_refine
         self.corr_proj_dim = corr_proj_dim
+        self.use_layer_moe = use_layer_moe
 
         dtype = _resolve_torch_dtype(backbone_dtype)
         dtype_desc = "fp32" if dtype is None else str(dtype)
@@ -676,8 +713,9 @@ class VGGTHeadModel(nn.Module):
                 dropout_p=self.head_dropout,
                 use_corr_features=self.use_corr_features,
                 use_corr_refine=self.use_corr_refine,
+                use_layer_moe=self.use_layer_moe,
                 num_summary_tokens=self.summary_tokens
-                if (self.use_corr_features or self.use_corr_refine)
+                if (self.use_corr_features or self.use_corr_refine or self.use_layer_moe)
                 else None,
                 corr_proj_dim=self.corr_proj_dim,
             ).to(self.device)
@@ -1212,6 +1250,11 @@ def main():
         action="store_true",
         help="Enable cross-layer refinement based on correspondence descriptors in the base head.",
     )
+    parser.add_argument(
+        "--use_layer_moe",
+        action="store_true",
+        help="Enable layer-wise Mixture-of-Experts weighting in the base head (multi-layer only).",
+    )
     args = parser.parse_args()
 
     if args.mixing_aware is not None and args.head_type != "scene_aware":
@@ -1256,6 +1299,7 @@ def main():
             mixing_aware=args.mixing_aware,
             use_corr_features=args.use_corr_features,
             use_corr_refine=args.use_corr_refine,
+            use_layer_moe=args.use_layer_moe,
         )
     except Exception as exc:
         print(f"[ERROR] Failed to load VGGTHeadModel: {exc}")
